@@ -29,7 +29,7 @@ The additional readable root is optional. Settings apply when the server starts.
 | `readable_roots` | `[]` | Additional existing absolute paths that may be read. |
 | `writable_roots` | `[]` | Additional existing absolute paths that may be written. |
 
-The embedded server accepts equivalent `sandbox` startup options. Unsupported hosts and remote locations are refused when enforcement is enabled.
+The embedded server accepts equivalent `sandbox` startup options. Unsupported hosts refuse to start with sandboxing enabled. On macOS, remote workspaces can open, but operations that require sandboxing, including shell and confined file tools, are unavailable there.
 
 ## Behavior
 

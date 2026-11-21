@@ -237,6 +237,7 @@ export const Plugin = {
           output: Output,
           execute: (input: typeof Input.Type, context) =>
             Effect.gen(function* () {
+              if (sandbox.unavailable) return yield* sandbox.unavailable
               const escalated = input.sandbox_permissions === "require_escalated"
               if (escalated && (!sandbox.enabled || sandbox.approval === "never"))
                 return yield* new Sandbox.UnavailableError({

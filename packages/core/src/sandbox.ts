@@ -31,6 +31,7 @@ export class UnavailableError extends Schema.TaggedError<UnavailableError>()("Sa
 
 export interface Interface {
   readonly enabled: boolean
+  readonly unavailable?: UnavailableError
   readonly scratch?: string
   readonly approval: "on-request" | "never"
   readonly fullDiskRead: boolean
@@ -132,6 +133,10 @@ export const configured = (input?: Options) => {
         const options = yield* Settings
         const enabled = options.enabled === true
         const approval = options.approval ?? "on-request"
+        const unavailable =
+          enabled && location.workspaceID !== undefined
+            ? new UnavailableError({ message: "Sandboxed operations require a local macOS execution host." })
+            : undefined
         // Scratch lives as long as this Location, including its background jobs.
         const scratch =
           enabled && process.platform === "darwin" && location.workspaceID === undefined
@@ -164,7 +169,7 @@ export const configured = (input?: Options) => {
               }).pipe(Effect.orDie)
             : undefined
 
-        if (enabled && (!backend || !policy || !scratch))
+        if (enabled && !unavailable && (!backend || !policy || !scratch))
           return yield* Effect.die(
             new UnavailableError({ message: "Sandboxed Locations require a local macOS execution host." }),
           )
@@ -272,15 +277,16 @@ export const configured = (input?: Options) => {
 
         return Service.of({
           enabled,
+          unavailable,
           scratch,
           approval,
           fullDiskRead: options.fullDiskRead ?? false,
           status: Effect.fn("Sandbox.status")(function* () {
-            const current = enabled ? yield* effectivePolicy() : undefined
+            const current = policy ? yield* effectivePolicy() : undefined
             return {
               active: enabled && current !== undefined,
               reads: enabled ? (options.fullDiskRead ? "broad" : "restricted") : "unrestricted",
-              escalation: enabled ? approval : "disabled",
+              escalation: current ? approval : "disabled",
               writableRoots: current?.writableRoots ?? [],
               readableRoots:
                 current && backend
