@@ -21,6 +21,7 @@ export const Options = Schema.Struct({
   enabled: Schema.optional(Schema.Boolean),
   approval: Schema.optional(Schema.Literals(["on-request", "never"])),
   fullDiskRead: Schema.optional(Schema.Boolean),
+  allowGitWrites: Schema.optional(Schema.Boolean),
   readableRoots: Schema.optional(Schema.Array(Schema.String)),
   writableRoots: Schema.optional(Schema.Array(Schema.String)),
 })

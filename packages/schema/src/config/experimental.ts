@@ -15,6 +15,9 @@ export const Sandbox = Schema.Struct({
   full_disk_read: Schema.Boolean.pipe(optional).annotate({
     description: "Allow broad reads subject to protected-path exclusions. Defaults to false.",
   }),
+  allow_git_writes: Schema.Boolean.pipe(optional).annotate({
+    description: "Allow writes to .git metadata within the workspace. Defaults to false.",
+  }),
   readable_roots: Schema.Array(Schema.String).pipe(optional).annotate({
     description: "Additional existing absolute paths the sandbox may read.",
   }),

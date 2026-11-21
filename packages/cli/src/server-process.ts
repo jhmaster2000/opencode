@@ -89,6 +89,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
         enabled: configured.enabled,
         approval: configured.approval,
         fullDiskRead: configured.full_disk_read,
+        allowGitWrites: configured.allow_git_writes,
         readableRoots: configured.readable_roots,
         writableRoots: configured.writable_roots,
       })

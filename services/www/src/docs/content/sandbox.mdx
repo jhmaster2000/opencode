@@ -26,6 +26,7 @@ The additional readable root is optional. Settings apply when the server starts.
 | `enabled` | `false` | Set to `true` to enable. |
 | `approval` | `on-request` | Set to `never` to prohibit requests for sandbox escapes and workspace changes. |
 | `full_disk_read` | `false` | Allow broad disk reads, subject to [read exclusions](#read-exclusions). |
+| `allow_git_writes` | `false` | Allow writes to `.git` metadata inside the workspace, including nested repositories and submodules. |
 | `readable_roots` | `[]` | Additional existing absolute paths that may be read. |
 | `writable_roots` | `[]` | Additional existing absolute paths that may be written. |
 
@@ -34,6 +35,18 @@ The embedded server accepts equivalent `sandbox` startup options. Unsupported ho
 ## Behavior
 
 Commands and their descendants can write to the workspace, sandbox scratch, and configured writable roots, except protected metadata and credentials. Reads are restricted to those roots, configured readable roots, registered [references](/references), and system/runtime paths. References are trusted read grants, including repositories cloned into OpenCode's data directory; their contents may be read by the agent without a separate sandbox approval. Registering a reference does not grant write access or remove existing write access: a reference inside the workspace or another writable root remains writable unless separately protected. [Read exclusions](#read-exclusions) still apply. The default runtime grants include `/private/etc`, `/Library/Preferences`, and selected Homebrew installation directories under `/opt/homebrew`; they can contain configuration readable by your account. Broad reads expose more of the account's files, so opt in only when appropriate. Command network access is blocked.
+
+By default, the sandbox protects `.git` metadata at every level of the workspace. Set `allow_git_writes` to `true` to allow commands such as `git add`, `git commit`, and branch checkouts to update that metadata.
+
+```jsonc
+{
+  "experimental": { "sandbox": { "enabled": true, "allow_git_writes": true } },
+}
+```
+
+Other filesystem and network rules still apply. If a linked worktree stores Git metadata outside the workspace, this setting does not grant write access to it. Enable this only for workspaces you trust with changes to Git configuration and hooks, which can affect later Git commands you run outside the sandbox.
+
+Read-only Git commands can run if their configuration and dependencies are readable.
 
 When a sandboxed workspace starts, OpenCode asks Git for the active system and global configuration origins and grants read access to the discovered files, including user-configured includes. These files can contain personal information or credentials, which the agent can read. Repository-controlled includes are not automatically granted access to files outside the workspace, and read exclusions still apply. Restart the workspace or server after changing the set of Git configuration files. Git does not report an origin for an empty configuration file; if it cannot read one, add that file to `readable_roots`.
 
