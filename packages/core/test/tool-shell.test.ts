@@ -56,23 +56,23 @@ const assertions: Permission.AssertInput[] = []
 let denyAction: string | undefined
 let afterPermission = (_input: Permission.AssertInput): Effect.Effect<void> => Effect.void
 
-const permission = permissionLayer({
-  assert: (input) =>
-    Effect.sync(() => assertions.push(input)).pipe(
-      Effect.andThen(Effect.suspend(() => afterPermission(input))),
-      Effect.andThen(
-        input.action === denyAction
-          ? Effect.fail(
-              new Permission.BlockedError({
-                rules: [],
-                permission: input.action,
-                resources: input.resources,
-              }),
-            )
-          : Effect.void,
-      ),
+const assertPermission = (input: Permission.AssertInput) =>
+  Effect.sync(() => assertions.push(input)).pipe(
+    Effect.andThen(Effect.suspend(() => afterPermission(input))),
+    Effect.andThen(
+      input.action === denyAction
+        ? Effect.fail(
+            new Permission.BlockedError({
+              rules: [],
+              permission: input.action,
+              resources: input.resources,
+            }),
+          )
+        : Effect.void,
     ),
-})
+  )
+
+const permission = permissionLayer({ assert: assertPermission, assertSandboxedShell: assertPermission })
 
 const reset = () => {
   assertions.length = 0
@@ -983,7 +983,7 @@ describe("ShellTool", () => {
             metadata: { exit: 0 },
             content: [{ type: "text", text: '{"command":"final launch","escalated":false}\n' }],
           })
-          expect(assertions.filter((item) => item.action === "shell")).toMatchObject([{ prompt: "skip" }])
+          expect(assertions.filter((item) => item.action === "shell")).toHaveLength(1)
           expect(assertions.some((item) => item.action === "sandbox.exec")).toBe(false)
         }),
       )

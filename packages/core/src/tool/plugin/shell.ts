@@ -5,7 +5,7 @@ import type { Context } from "@opencode/plugin/effect/plugin"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
 import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
 import type { Tool } from "@opencode/schema/tool"
-import { Deferred, Effect, Schema, Scope } from "effect"
+import { Array, Deferred, Effect, Schema, Scope } from "effect"
 import { Environment } from "../../environment/index.js"
 import { Job } from "../../job.js"
 import { FileAccess } from "../../file-access.js"
@@ -155,23 +155,23 @@ export const Plugin = {
           kind: "directory",
         }),
       )
-      if (!sandbox.enabled) yield* access.authorizeExternal([target, ...directories], context)
       if (sandbox.enabled) {
-        const resources = [target, ...directories].flatMap((item) =>
-          item.externalDirectory ? [item.externalDirectory.resource] : [],
+        const external = Array.dedupeWith(
+          [target, ...directories].flatMap((item) => (item.externalDirectory ? [item.externalDirectory] : [])),
+          (left, right) => left.resource === right.resource,
         )
-        if (resources.length > 0)
-          yield* permission.assert({
+        if (external.length)
+          yield* permission.assertSandboxedShell({
             action: "external_directory",
-            resources,
+            resources: external.map((item) => item.resource),
+            save: external.map((item) => item.save),
             sessionID: context.sessionID,
             agent: context.agent,
             source,
-            prompt: "skip",
           })
-      }
-      if (parsed.commands.length > 0 || sandbox.enabled)
-        yield* permission.assert({
+      } else yield* access.authorizeExternal([target, ...directories], context)
+      if (parsed.commands.length > 0 || sandbox.enabled) {
+        const input = {
           action: name,
           resources:
             parsed.commands.length > 0 ? parsed.commands.map((command) => command.resource) : [invocation.command],
@@ -179,8 +179,9 @@ export const Plugin = {
           sessionID: context.sessionID,
           agent: context.agent,
           source,
-          prompt: sandbox.enabled ? "skip" : undefined,
-        })
+        } as const
+        yield* sandbox.enabled ? permission.assertSandboxedShell(input) : permission.assert(input)
+      }
       // Approval can outlive the directory, so validate immediately before spawning.
       const workdir = yield* Environment.typeFollowing(environment.files, target.absolute).pipe(
         Effect.catchTag("Environment.NotFound", () =>

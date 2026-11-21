@@ -90,7 +90,7 @@ function assertion(input: Partial<Permission.AssertInput> = {}) {
   } satisfies Permission.AssertInput
 }
 
-function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
+function waitForRequest(input: Partial<Permission.AssertInput> = {}, sandboxedShell = false) {
   return Effect.gen(function* () {
     const value = assertion(input)
     const service = yield* Permission.Service
@@ -102,7 +102,11 @@ function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
       return request.id === value.id ? Deferred.succeed(asked, request).pipe(Effect.asVoid) : Effect.void
     })
     yield* Effect.addFinalizer(() => unsubscribe)
-    const fiber = yield* service.assert(value).pipe(Effect.forkScoped)
+    const assert =
+      sandboxedShell && (value.action === "shell" || value.action === "external_directory")
+        ? service.assertSandboxedShell({ ...value, action: value.action })
+        : service.assert(value)
+    const fiber = yield* assert.pipe(Effect.forkScoped)
     const request = yield* Deferred.await(asked)
     return { service, fiber, request }
   })
@@ -274,16 +278,29 @@ describe("Permission", () => {
     }),
   )
 
-  it.effect("sandbox execution skips routine prompts but preserves denies", () =>
+  it.effect("allows unmatched sandboxed shell commands while preserving explicit asks and denies", () =>
     Effect.gen(function* () {
-      yield* setup()
+      yield* setup([
+        { action: "shell", resource: "rm *", effect: "ask" },
+        { action: "shell", resource: "touch *", effect: "deny" },
+        { action: "external_directory", resource: "/outside/*", effect: "ask" },
+      ])
       const service = yield* Permission.Service
-      yield* service.assert(assertion({ action: "shell", prompt: "skip" }))
+      const input = { ...assertion(), action: "shell" as const, resources: ["pwd"] }
+      yield* service.assertSandboxedShell(input)
       expect(yield* service.list()).toEqual([])
-      yield* setRules([{ action: "shell", resource: "*", effect: "deny" }])
-      expect(yield* service.assert(assertion({ action: "shell", prompt: "skip" })).pipe(Effect.flip)).toBeInstanceOf(
-        Permission.BlockedError,
-      )
+      const denied = yield* Effect.flip(service.assertSandboxedShell({ ...input, resources: ["touch blocked"] }))
+      expect(denied).toBeInstanceOf(Permission.BlockedError)
+
+      for (const request of [
+        { action: "shell", resources: ["pwd", "rm draft"] },
+        { action: "external_directory", resources: ["/outside/*"] },
+      ]) {
+        const pending = yield* waitForRequest(request, true)
+        expect(pending.request).toMatchObject(request)
+        yield* service.reply({ requestID: pending.request.id, reply: "once" })
+        yield* Fiber.join(pending.fiber)
+      }
     }),
   )
 

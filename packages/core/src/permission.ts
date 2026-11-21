@@ -34,7 +34,7 @@ export type Reply = typeof Reply.Type
 export interface AssertInput extends Omit<Request, "id" | "message"> {
   readonly id?: ID
   readonly agent?: Agent.ID
-  /** Internal execution policy. Forced prompts ignore saved and wildcard allows. */
+  /** Confined file tools may skip prompts. Forced prompts ignore saved and wildcard allows. */
   readonly prompt?: "skip" | "force"
   /** Final shell invocation, supplied only by the execution leaf. Never accepted from the API. */
   readonly sandboxCommand?: SandboxApproval.Command
@@ -93,16 +93,12 @@ export class InvalidReplyError extends Schema.TaggedError<InvalidReplyError>()("
 
 export type Error = BlockedError | CorrectedError
 
+function match(action: string, resource: string, rules: Permission.Ruleset) {
+  return rules.findLast((rule) => Wildcard.match(action, rule.action) && Wildcard.match(resource, rule.resource))
+}
+
 export function evaluate(action: string, resource: string, ...rulesets: Permission.Ruleset[]): Permission.Rule {
-  return (
-    rulesets
-      .flat()
-      .findLast((rule) => Wildcard.match(action, rule.action) && Wildcard.match(resource, rule.resource)) ?? {
-      action,
-      resource: "*",
-      effect: "ask",
-    }
-  )
+  return match(action, resource, rulesets.flat()) ?? { action, resource: "*", effect: "ask" }
 }
 
 export function merge(...rulesets: Permission.Ruleset[]): Permission.Ruleset {
@@ -113,6 +109,10 @@ export interface Interface {
   readonly close: Effect.Effect<void>
   readonly ask: (input: AssertInput) => Effect.Effect<AskResult, SessionErrors.NotFoundError>
   readonly assert: (input: AssertInput) => Effect.Effect<void, Error | SessionErrors.NotFoundError>
+  /** Applies normal shell rules, allowing unmatched resources when the launch is OS-confined. */
+  readonly assertSandboxedShell: (
+    input: AssertInput & { action: "shell" | "external_directory" },
+  ) => Effect.Effect<void, Error | SessionErrors.NotFoundError>
   /** Fails only when the rules deny the request; never asks the user. */
   readonly assertNotDenied: (input: AssertInput) => Effect.Effect<void, BlockedError | SessionErrors.NotFoundError>
   /** True only when the rules already allow the request; never asks the user. */
@@ -130,6 +130,7 @@ interface Pending {
   readonly agent?: Agent.ID
   readonly prompt?: AssertInput["prompt"]
   readonly sandboxCommand?: SandboxApproval.Command
+  readonly fallback: "ask" | "allow"
   readonly deferred: Deferred.Deferred<void, DeclinedError | CorrectedError>
 }
 
@@ -186,7 +187,7 @@ const layer = Layer.effect(
       return rules.filter((rule) => Wildcard.match(input.action, rule.action))
     }
 
-    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput) {
+    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput, fallback: "ask" | "allow" = "ask") {
       const rules = yield* configured(input.sessionID, input.agent)
       if (denied(input, rules)) return { effect: "deny" as const, rules }
       const all = [...rules, ...(yield* savedRules())]
@@ -194,17 +195,13 @@ const layer = Layer.effect(
         input.action === "sandbox.exec" && input.prompt === "force" && input.sandboxCommand !== undefined
           ? yield* approvals.allows(input.sessionID, input.sandboxCommand)
           : false
-      const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
+      const needsApproval = input.resources.some(
+        (resource) => (match(input.action, resource, all)?.effect ?? fallback) === "ask",
+      )
+      const skipFilePrompt =
+        input.prompt === "skip" && ["read", "edit", "glob", "grep", "external_directory"].includes(input.action)
       const effect: Permission.Effect =
-        input.prompt === "force"
-          ? remembered
-            ? "allow"
-            : "ask"
-          : input.prompt === "skip"
-            ? "allow"
-            : effects.includes("ask")
-              ? "ask"
-              : "allow"
+        input.prompt === "force" ? (remembered ? "allow" : "ask") : skipFilePrompt || !needsApproval ? "allow" : "ask"
       const event = yield* hooks.trigger("permission", "evaluate", {
         sessionID: input.sessionID,
         agent: input.agent,
@@ -221,7 +218,7 @@ const layer = Layer.effect(
       const settled = [...all, ...unattended]
       const allowed =
         input.prompt !== "force" &&
-        input.resources.every((resource) => evaluate(input.action, resource, settled).effect === "allow")
+        input.resources.every((resource) => (match(input.action, resource, settled)?.effect ?? fallback) === "allow")
       if (allowed) return { effect: "allow" as const, rules: all }
       return {
         effect: "deny" as const,
@@ -257,11 +254,12 @@ const layer = Layer.effect(
       agent?: Agent.ID,
       prompt?: AssertInput["prompt"],
       sandboxCommand?: SandboxApproval.Command,
+      fallback: "ask" | "allow" = "ask",
     ) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
           const deferred = yield* Deferred.make<void, DeclinedError | CorrectedError>()
-          const item = { request, agent, prompt, sandboxCommand, deferred }
+          const item = { request, agent, prompt, sandboxCommand, fallback, deferred }
           if (closed) {
             yield* Deferred.fail(deferred, new DeclinedError())
             return item
@@ -284,10 +282,10 @@ const layer = Layer.effect(
       return { id: value.id, effect: result.effect }
     })
 
-    const assert = Effect.fn("Permission.assert")((input: AssertInput) =>
+    const assertWithFallback = Effect.fn("Permission.assert")((input: AssertInput, fallback: "ask" | "allow") =>
       Effect.gen(function* () {
         if (closed) return yield* Effect.die(new DeclinedError())
-        const result = yield* evaluateInput(input)
+        const result = yield* evaluateInput(input, fallback)
         return yield* Effect.uninterruptibleMask((restore) =>
           Effect.gen(function* () {
             if (result.effect === "deny") {
@@ -299,7 +297,13 @@ const layer = Layer.effect(
               })
             }
             if (result.effect === "allow") return
-            const item = yield* create(request(input, result.message), input.agent, input.prompt, input.sandboxCommand)
+            const item = yield* create(
+              request(input, result.message),
+              input.agent,
+              input.prompt,
+              input.sandboxCommand,
+              fallback,
+            )
             return yield* restore(Deferred.await(item.deferred)).pipe(
               // Deliberate defect tunnel: leaves wrap execution in blanket `mapError`, which
               // must not convert a user's decline into model-facing tool output. The decline
@@ -394,12 +398,15 @@ const layer = Layer.effect(
           if (input.reply !== "always" || (!sessionGrant && !existing.request.save?.length)) return
 
           for (const [id, item] of pending) {
-            const result = yield* evaluateInput({
-              ...item.request,
-              agent: item.agent,
-              prompt: item.prompt,
-              sandboxCommand: item.sandboxCommand,
-            }).pipe(Effect.catchTag("Session.NotFoundError", () => Effect.undefined))
+            const result = yield* evaluateInput(
+              {
+                ...item.request,
+                agent: item.agent,
+                prompt: item.prompt,
+                sandboxCommand: item.sandboxCommand,
+              },
+              item.fallback,
+            ).pipe(Effect.catchTag("Session.NotFoundError", () => Effect.undefined))
             if (result?.effect !== "allow") continue
             yield* bus.publish(Permission.Event.Replied, {
               sessionID: item.request.sessionID,
@@ -425,7 +432,18 @@ const layer = Layer.effect(
       return Array.from(pending.values(), (item) => item.request).filter((request) => request.sessionID === sessionID)
     })
 
-    return Service.of({ ask, assert, assertNotDenied, allows, reply, get, forSession, list, close })
+    return Service.of({
+      ask,
+      assert: (input) => assertWithFallback(input, "ask"),
+      assertSandboxedShell: (input) => assertWithFallback(input, "allow"),
+      assertNotDenied,
+      allows,
+      reply,
+      get,
+      forSession,
+      list,
+      close,
+    })
   }),
 )
 
