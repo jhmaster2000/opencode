@@ -120,6 +120,15 @@ export function make(options: {
         Effect.mapError((error) => failure(value, error)),
         Effect.asVoid,
       ),
+    append: (value, bytes) =>
+      Effect.suspend(() => {
+        if (bytes.byteLength > SandboxFileProtocol.MAX_DATA_BYTES)
+          return Effect.fail(failure(value, new Error("File helper write exceeds its collection limit")))
+        return run({ op: "append", path: absolute(value), data: Buffer.from(bytes).toString("base64") })
+      }).pipe(
+        Effect.mapError((error) => failure(value, error)),
+        Effect.asVoid,
+      ),
     mkdir: (value) =>
       Effect.suspend(() => run({ op: "mkdir", path: absolute(value) })).pipe(
         Effect.mapError((error) => failure(value, error)),

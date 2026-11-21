@@ -37,6 +37,7 @@ const layer = Layer.effect(
       stat: (target) => binding(target).pipe(Effect.flatMap((files) => files.stat(target))),
       list: (target) => binding(target).pipe(Effect.flatMap((files) => files.list(target))),
       write: (target, bytes) => binding(target).pipe(Effect.flatMap((files) => files.write(target, bytes))),
+      append: (target, bytes) => binding(target).pipe(Effect.flatMap((files) => files.append(target, bytes))),
       mkdir: (target) => binding(target).pipe(Effect.flatMap((files) => files.mkdir(target))),
       remove: (target) => binding(target).pipe(Effect.flatMap((files) => files.remove(target))),
       move: (from, to) => binding(from).pipe(Effect.flatMap((files) => files.move(from, to))),

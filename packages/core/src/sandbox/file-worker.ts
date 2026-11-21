@@ -42,7 +42,7 @@ void (async () => {
       chunks.push(chunk);
     }
     const request = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    if (!request || !["read", "write", "stat", "list", "mkdir", "remove", "move", "check"].includes(request.op) || !validPath(request.path)) fail("Invalid file helper request");
+    if (!request || !["read", "write", "append", "stat", "list", "mkdir", "remove", "move", "check"].includes(request.op) || !validPath(request.path)) fail("Invalid file helper request");
     if (request.op === "move" && !validPath(request.to)) fail("Invalid move destination");
     if (request.op === "read" && request.range !== undefined &&
         (!request.range || !integer(request.range.offset, Number.MAX_SAFE_INTEGER) || !integer(request.range.length, MAX_DATA) || !Number.isSafeInteger(request.range.offset + request.range.length))) fail("Invalid byte range");
@@ -122,10 +122,10 @@ void (async () => {
       }
       send({ op: "list", entries }); return;
     }
-    if (request.op === "write") {
+    if (request.op === "write" || request.op === "append") {
       const bytes = decode(request.data);
       await fs.mkdir(path.dirname(request.path), { recursive: true });
-      await fs.writeFile(request.path, bytes, { flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NONBLOCK });
+      await fs.writeFile(request.path, bytes, { flag: constants.O_WRONLY | constants.O_CREAT | (request.op === "append" ? constants.O_APPEND : constants.O_TRUNC) | constants.O_NONBLOCK });
     }
     if (request.op === "mkdir") await fs.mkdir(request.path, { recursive: true });
     if (request.op === "remove") await fs.rm(request.path, { recursive: true, force: true });

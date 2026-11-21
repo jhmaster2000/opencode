@@ -1,3 +1,8 @@
+import { Flag } from "@opencode/core/flag"
+import { Config } from "@opencode/core/config"
+import { Skill } from "@opencode/core/skill"
+import { InstructionDiscovery } from "../src/instruction-discovery.js"
+import { FileWrite } from "@opencode/core/file-write"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { expect } from "bun:test"
@@ -33,7 +38,6 @@ import { GrepTool } from "../src/tool/plugin/grep"
 import { PatchTool } from "../src/tool/plugin/patch"
 import { ReadTool } from "../src/tool/plugin/read"
 import { WriteTool } from "../src/tool/plugin/write"
-import { ReadToolFileSystem } from "../src/tool/read-filesystem"
 import { FSUtil } from "@opencode/util/fs-util"
 import { hostEnvironmentLayer } from "./fixture/environment"
 import { location } from "./fixture/location"
@@ -56,12 +60,17 @@ const toolsNode = makeLocationNode({
     ]),
   ),
   deps: [
+    FileWrite.node,
+    Environment.node,
+    InstructionDiscovery.node,
+    Skill.node,
+    Config.node,
+    Flag.node,
     Tool.node,
     AgentFiles.node,
     FileAccess.node,
     FileMutation.node,
     Formatter.node,
-    ReadToolFileSystem.node,
     Ripgrep.agentNode,
     Location.node,
     Permission.node,
@@ -122,6 +131,7 @@ function fixture(fullDiskRead = false) {
               read: () => Effect.die("Native tools must not read host files"),
               stat: () => Effect.die("Native tools must not stat host files"),
               list: () => Effect.die("Native tools must not list host files"),
+              append: () => Effect.die("Host file append must not be used"),
               write: () => Effect.die("Native tools must not write host files"),
               remove: () => Effect.die("Native tools must not remove host files"),
               move: () => Effect.die("Native tools must not move host files"),
@@ -187,7 +197,15 @@ function fixture(fullDiskRead = false) {
       }).pipe(
         Effect.provide(
           AppNodeBuilder.build(
-            LayerNode.group([Tool.node, toolsNode, Formatter.node, AgentFiles.node, AppProcess.node, Sandbox.node]),
+            LayerNode.group([
+              Tool.node,
+              toolsNode,
+              FileAccess.node,
+              Formatter.node,
+              AgentFiles.node,
+              AppProcess.node,
+              Sandbox.node,
+            ]),
             [
               Location.node.replace(
                 Layer.succeed(
@@ -418,12 +436,12 @@ transport("filename recovery, missing-file suggestions, media and discovered ins
         const recovered = yield* f.call(tools, "read", { path: "image name.png" })
         expect(recovered.status).toBe("completed")
         expect(recovered.output).toMatchObject({
-          encoding: "base64",
-          content: png.toString("base64"),
+          type: "media",
+          name: "image\u202fname.png",
           mime: "image/png",
         })
         const pdf = yield* f.call(tools, "read", { path: "paper.pdf" })
-        expect(pdf.output).toMatchObject({ encoding: "base64", mime: "application/pdf" })
+        expect(pdf.output).toMatchObject({ type: "media", mime: "application/pdf" })
         expect((yield* f.call(tools, "read", { path: "nested/text.txt" })).status).toBe("completed")
         expect(f.instructions).toEqual(["confined instructions"])
         const missing = yield* f.call(tools, "read", { path: "paper" })
@@ -571,7 +589,7 @@ echo formatted >> formats.log
             patchText: "*** Begin Patch\n*** Update File: a.txt\n@@\n-AFTER\n+patched\n*** End Patch",
           })
           expect(patched.status).toBe("completed")
-          expect(patched.output).toMatchObject({ files: [{ patch: expect.stringContaining("+PATCHED") }] })
+          expect(patched.metadata).toMatchObject({ files: [{ patch: expect.stringContaining("+PATCHED") }] })
           expect(
             (yield* f.call(tools, "write", { path: "a.blocked", content: "edit survives formatter failure" })).status,
           ).toBe("completed")
@@ -668,6 +686,7 @@ echo uv >> "$3"
         () =>
           Effect.gen(function* () {
             const formatter = yield* Formatter.Service
+            const access = yield* FileAccess.Service
             const environment = yield* AgentFiles.Service
             const input = {
               directory: f.directory,
@@ -684,19 +703,29 @@ echo uv >> "$3"
               npm: { which: () => Effect.die("Sandbox discovery must not install formatter packages") },
             }
             yield* formatter.transform((editor) => make(input).forEach(editor.set))
-            expect(yield* formatter.file(path.join(f.directory, "a.py"))).toBe(true)
-            expect(yield* formatter.file(path.join(f.directory, "a.js"))).toBe(true)
+            expect(
+              yield* formatter.file(yield* access.resolve({ path: path.join(f.directory, "a.py"), kind: "file" })),
+            ).toBe(true)
+            expect(
+              yield* formatter.file(yield* access.resolve({ path: path.join(f.directory, "a.js"), kind: "file" })),
+            ).toBe(true)
             yield* formatter.transform((editor) =>
               make({ ...input, directory: path.join(f.directory, "nested") }).forEach(editor.set),
             )
-            expect(yield* formatter.file(path.join(f.directory, "nested", "a.js"))).toBe(true)
+            expect(
+              yield* formatter.file(
+                yield* access.resolve({ path: path.join(f.directory, "nested", "a.js"), kind: "file" }),
+              ),
+            ).toBe(true)
             yield* formatter.transform((editor) => make(input).forEach(editor.set))
             yield* Effect.promise(async () => {
               await fs.unlink(path.join(f.directory, "package.json"))
               await fs.symlink(path.join(f.host.home, "package.json"), path.join(f.directory, "package.json"))
             })
             yield* formatter.reload()
-            expect(yield* formatter.file(path.join(f.directory, "a.js"))).toBe(false)
+            expect(
+              yield* formatter.file(yield* access.resolve({ path: path.join(f.directory, "a.js"), kind: "file" })),
+            ).toBe(false)
           }),
         "kernel",
       ),
@@ -722,6 +751,7 @@ transport("formatter sandbox unavailability never retries on the host", () =>
       () =>
         Effect.gen(function* () {
           const formatter = yield* Formatter.Service
+          const access = yield* FileAccess.Service
           yield* formatter.transform((editor) =>
             editor.set({
               name: "no-fallback",
@@ -729,7 +759,7 @@ transport("formatter sandbox unavailability never retries on the host", () =>
               enabled: Effect.succeed(["/bin/sh", "-c", 'echo escaped > "$1"', "formatter", "$FILE"]),
             }),
           )
-          expect(yield* formatter.file(target)).toBe(false)
+          expect(yield* formatter.file(yield* access.resolve({ path: target, kind: "file" }))).toBe(false)
         }),
       "unavailable",
     )

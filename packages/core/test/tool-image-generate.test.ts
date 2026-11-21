@@ -70,6 +70,12 @@ const it = testEffect(
             ),
           ),
         decisions: () => Effect.die("unused"),
+        video: {
+          start: () => Effect.die("unused"),
+          status: () => Effect.die("unused"),
+          result: () => Effect.die("unused"),
+          cancel: () => Effect.die("unused"),
+        },
       }),
     ),
   ),
@@ -98,7 +104,7 @@ const setup = (providerID = "test", overrides?: { files: AgentFiles.Interface; s
     const plugins = yield* Plugin.Service
     const sessions = yield* Session.Service
     const location = yield* Location.Service
-    const host = yield* PluginHost.make(plugins)
+    const host = yield* PluginHost.make(plugins, "test")
     const imagePlugin = ImageGenerateTool.Plugin.effect(host)
     yield* overrides
       ? imagePlugin.pipe(
@@ -300,7 +306,7 @@ describe("experimental_image_generate", () => {
       ])
       // The notice carries the job ID from the start result, like shell notices.
       expect(yield* notice(result)).toBe(
-        `<image id="${id}" state="completed">\nImage request finished. Saved image: ${file} (test/painter).\nUse the read tool on this path to view the image.\n</image>`,
+        `<background-result kind="image" id="${id}" state="completed">\nImage request finished. Saved image: ${file} (test/painter).\nUse the read tool on this path to view the image.\n</background-result>`,
       )
       expect((yield* Effect.promise(() => fs.readFile(file))).toString("base64")).toBe(PNG)
       expect(fixture.requests).toEqual([
@@ -376,7 +382,7 @@ describe("experimental_image_generate", () => {
       })
       const result = yield* run({ prompt: "x", path: "out.png" })
       expect(yield* notice(result)).toBe(
-        `<image id="${result.output.id}" state="error">\nImage request failed for ${path.join(directory, "out")}: The prompt was rejected\n</image>`,
+        `<background-result kind="image" id="${result.output.id}" state="error">\nImage request failed for ${path.join(directory, "out")}: The prompt was rejected\n</background-result>`,
       )
       expect(yield* Effect.promise(() => Bun.file(path.join(directory, "out.png")).exists())).toBe(false)
     }),
@@ -393,7 +399,7 @@ describe("experimental_image_generate", () => {
       expect((yield* jobs.get(id))?.status).toBe("running")
       yield* jobs.cancel(id)
       expect(yield* notice(result)).toBe(
-        `<image id="${id}" state="cancelled">\nImage request for ${path.join(directory, "out")} was cancelled.\n</image>`,
+        `<background-result kind="image" id="${id}" state="cancelled">\nImage request for ${path.join(directory, "out")} was cancelled.\n</background-result>`,
       )
       expect(yield* Effect.promise(() => Bun.file(path.join(directory, "out.png")).exists())).toBe(false)
     }),

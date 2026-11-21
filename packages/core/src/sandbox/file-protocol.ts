@@ -25,7 +25,7 @@ export const Request = Schema.Union([
   }).check(
     Schema.makeFilter((request) => !request.range || Number.isSafeInteger(request.range.offset + request.range.length)),
   ),
-  Schema.Struct({ op: Schema.Literal("write"), path: Path, data: Data }),
+  Schema.Struct({ op: Schema.Literals(["write", "append"]), path: Path, data: Data }),
   Schema.Struct({ op: Schema.Literal("check"), path: Path, operation: Schema.Literals(["write", "remove"]) }),
   Schema.Struct({ op: Schema.Literals(["stat", "list", "mkdir", "remove"]), path: Path }),
   Schema.Struct({ op: Schema.Literal("move"), path: Path, to: Path }),
@@ -41,7 +41,7 @@ export const Reply = Schema.Union([
       Schema.isMaxLength(MAX_ENTRIES),
     ),
   }),
-  Schema.Struct({ op: Schema.Literals(["write", "mkdir", "remove", "move", "check"]) }),
+  Schema.Struct({ op: Schema.Literals(["write", "append", "mkdir", "remove", "move", "check"]) }),
   Schema.Struct({
     op: Schema.Literal("error"),
     kind: Schema.Literals(["NotFound", "WrongKind", "Failed"]),
