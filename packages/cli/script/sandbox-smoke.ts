@@ -11,20 +11,28 @@ import { OpenCode } from "@opencode/client/promise"
 
 // Exercise the published executable through its real provider/tool/permission path.
 // Only the model responses are scripted. No production hook or plugin is installed.
-const source = process.argv[2] && path.resolve(process.argv[2])
-const linux = process.platform === "linux"
-if (!source || (!linux && process.platform !== "darwin"))
-  throw new Error("Usage on Linux or macOS: bun run script/sandbox-smoke.ts <compiled-opencode>")
-if (!linux) {
-  const probe = Bun.spawnSync(["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true"])
-  assert.equal(probe.exitCode, 0, "Run outside any enclosing sandbox so Seatbelt tests cannot skip")
+function smokeHost(platform: NodeJS.Platform) {
+  switch (platform) {
+    case "darwin": {
+      const probe = Bun.spawnSync(["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true"])
+      assert.equal(probe.exitCode, 0, "Run outside any enclosing sandbox so Seatbelt tests cannot skip")
+      return {
+        cpuCommand: 'count=$(sysctl -n hw.ncpu) && test "$count" -gt 0 && printf SYSCTL_WORKS',
+      }
+    }
+    case "linux":
+      return {
+        cpuCommand: 'count=$(getconf _NPROCESSORS_ONLN) && test "$count" -gt 0 && printf SYSCTL_WORKS',
+        stageResources: stageBubblewrap,
+      }
+    case "win32":
+      throw new Error("Windows sandbox artifact smoke testing is not implemented")
+    default:
+      throw new Error(`No sandbox artifact smoke test for ${platform}`)
+  }
 }
 
-await using temporary = await tmpdir("opencode-artifact-sandbox-")
-const binary = path.join(temporary.path, "opencode")
-await fs.copyFile(source, binary)
-await fs.chmod(binary, 0o755)
-if (linux) {
+async function stageBubblewrap(source: string, directory: string) {
   const fallback = path.join(path.dirname(source), "opencode-sandbox", "bwrap")
   if (
     await fs.stat(fallback).then(
@@ -35,11 +43,20 @@ if (linux) {
       },
     )
   ) {
-    const destination = path.join(temporary.path, "opencode-sandbox")
+    const destination = path.join(directory, "opencode-sandbox")
     await fs.mkdir(destination)
     await fs.copyFile(fallback, path.join(destination, "bwrap"))
   }
 }
+
+const source = process.argv[2] && path.resolve(process.argv[2])
+if (!source) throw new Error("Usage: bun run script/sandbox-smoke.ts <compiled-opencode>")
+const host = smokeHost(process.platform)
+await using temporary = await tmpdir("opencode-artifact-sandbox-")
+const binary = path.join(temporary.path, "opencode")
+await fs.copyFile(source, binary)
+await fs.chmod(binary, 0o755)
+await host.stageResources?.(source, temporary.path)
 const installedRipgrep = process.env.OPENCODE_TEST_RIPGREP ?? Bun.which("rg")
 assert(installedRipgrep, "An installed standalone ripgrep is required to seed the isolated managed cache")
 const rg = installedRipgrep
@@ -226,9 +243,7 @@ for (const fullDiskRead of [false, true]) {
     {
       name: "shell",
       input: {
-        command: linux
-          ? 'count=$(getconf _NPROCESSORS_ONLN) && test "$count" -gt 0 && printf SYSCTL_WORKS'
-          : 'count=$(sysctl -n hw.ncpu) && test "$count" -gt 0 && printf SYSCTL_WORKS',
+        command: host.cpuCommand,
       },
       expect: "SYSCTL_WORKS",
     },

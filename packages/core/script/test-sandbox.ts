@@ -3,31 +3,46 @@ import path from "node:path"
 import { tmpdir } from "../test/fixture/tmpdir"
 
 // Release enforcement gate: ordinary tests may skip unavailable native runtimes.
-const linux = process.platform === "linux"
-if (!linux && process.platform !== "darwin") throw new Error("Sandbox validation requires Linux or macOS")
-if (!linux) {
-  const probe = Bun.spawnSync([
-    "/usr/bin/sandbox-exec",
-    "-p",
-    '(version 1)(deny default)(allow process-exec)(import "/System/Library/Sandbox/Profiles/dyld-support.sb")',
-    "/usr/bin/true",
-  ])
-  if (probe.exitCode !== 0)
-    throw new Error(
-      `Seatbelt enforcement tests cannot run here: ${probe.stderr.toString().trim()}. Run outside any enclosing restrictive sandbox.`,
-    )
+function suite(platform: NodeJS.Platform): {
+  glob: string
+  exclude: readonly string[]
+  env: NodeJS.ProcessEnv
+} {
+  switch (platform) {
+    case "darwin": {
+      const probe = Bun.spawnSync([
+        "/usr/bin/sandbox-exec",
+        "-p",
+        '(version 1)(deny default)(allow process-exec)(import "/System/Library/Sandbox/Profiles/dyld-support.sb")',
+        "/usr/bin/true",
+      ])
+      if (probe.exitCode !== 0)
+        throw new Error(
+          `Seatbelt enforcement tests cannot run here: ${probe.stderr.toString().trim()}. Run outside any enclosing restrictive sandbox.`,
+        )
+      return { glob: "test/sandbox-*.test.ts", exclude: ["test/sandbox-linux.test.ts"], env: {} }
+    }
+    case "linux":
+      return { glob: "test/sandbox-linux.test.ts", exclude: [], env: { OPENCODE_LINUX_SANDBOX_TEST: "1" } }
+    case "win32":
+      throw new Error("Windows sandbox enforcement tests are not implemented")
+    default:
+      throw new Error(`No sandbox enforcement suite for ${platform}`)
+  }
 }
+
+const validation = suite(process.platform)
 
 await using temporary = await tmpdir("opencode-sandbox-validation-")
 const report = path.join(temporary.path, "results.xml")
-const files = (await Array.fromAsync(new Bun.Glob("test/sandbox-*.test.ts").scan({ cwd: process.cwd() })))
-  .filter((file) => linux === file.endsWith("/sandbox-linux.test.ts"))
+const files = (await Array.fromAsync(new Bun.Glob(validation.glob).scan({ cwd: process.cwd() })))
+  .filter((file) => !validation.exclude.includes(file))
   .sort()
 if (files.length === 0) throw new Error("Run sandbox validation from packages/core")
 const child = Bun.spawn(
   [process.execPath, "run", "script/test.ts", ...files, "--reporter=junit", `--reporter-outfile=${report}`],
   {
-    env: { ...process.env, ...(linux ? { OPENCODE_LINUX_SANDBOX_TEST: "1" } : {}) },
+    env: { ...process.env, ...validation.env },
     stdin: "inherit",
     stdout: "inherit",
     stderr: "inherit",

@@ -2,6 +2,7 @@ export * as LinuxSandbox from "./linux.js"
 
 import { execFile } from "node:child_process"
 import fs from "node:fs/promises"
+import { constants } from "node:os"
 import path from "node:path"
 import { promisify } from "node:util"
 import { SandboxBackend } from "./backend.js"
@@ -148,49 +149,111 @@ export async function profile(policy: SandboxPolicy.Policy, executable: string) 
   return entries
 }
 
+// Linux audit architecture and syscall numbers from the kernel UAPI.
+const syscallTables: Partial<
+  Record<NodeJS.Architecture, { audit: number; denied: number[]; sendto: number; socketpair: number }>
+> = {
+  arm64: {
+    audit: 0xc00000b7, // AUDIT_ARCH_AARCH64
+    denied: [
+      198, // socket
+      200, // bind
+      202, // accept
+      203, // connect
+      242, // accept4
+      269, // sendmmsg
+      117, // ptrace
+      270, // process_vm_readv
+      271, // process_vm_writev
+    ],
+    sendto: 206,
+    socketpair: 199,
+  },
+  x64: {
+    audit: 0xc000003e, // AUDIT_ARCH_X86_64
+    denied: [
+      41, // socket
+      49, // bind
+      43, // accept
+      42, // connect
+      288, // accept4
+      307, // sendmmsg
+      101, // ptrace
+      310, // process_vm_readv
+      311, // process_vm_writev
+    ],
+    sendto: 44,
+    socketpair: 53,
+  },
+}
+
+// Classic BPF opcodes from linux/filter.h and linux/bpf_common.h.
+const bpf = {
+  loadWord: 0x20, // BPF_LD | BPF_W | BPF_ABS
+  jumpEqual: 0x15, // BPF_JMP | BPF_JEQ | BPF_K
+  jumpGreaterOrEqual: 0x35, // BPF_JMP | BPF_JGE | BPF_K
+  returnConstant: 0x06, // BPF_RET | BPF_K
+}
+const seccompAction = {
+  killProcess: 0x80000000, // SECCOMP_RET_KILL_PROCESS
+  deny: 0x00050000 | constants.errno.EPERM, // SECCOMP_RET_ERRNO
+  allow: 0x7fff0000, // SECCOMP_RET_ALLOW
+}
+// Byte offsets in little-endian struct seccomp_data.
+const seccompOffset = {
+  syscall: 0, // nr
+  arch: 4,
+  firstArgument: 16, // args[0]
+  sendtoDestinationLow: 48, // args[4], low word
+  sendtoDestinationHigh: 52, // args[4], high word
+}
+const x32SyscallBit = 0x40000000 // __X32_SYSCALL_BIT
+const AF_UNIX = 1
+const ioUringSyscalls = [425, 426, 427] // io_uring_setup, io_uring_enter, io_uring_register
+
 // Classic BPF sock_filter instructions in native byte order on supported Linux targets.
 function seccomp() {
-  const arm = process.arch === "arm64"
-  if (!arm && process.arch !== "x64") throw new Error("Linux sandbox supports x64 and arm64")
-  const instructions: number[][] = [
-    [0x20, 0, 0, 4], // seccomp_data.arch
-    [0x15, 1, 0, arm ? 0xc00000b7 : 0xc000003e],
-    [0x06, 0, 0, 0x80000000],
-    [0x20, 0, 0, 0], // seccomp_data.nr
-    [0x35, 0, 1, 0x40000000], // reject the x32 syscall ABI
-    [0x06, 0, 0, 0x80000000],
+  const arch = process.arch
+  const table = syscallTables[arch]
+  if (!table) throw new Error(`Linux sandboxing is unavailable on ${arch}`)
+  // Each instruction is [opcode, true jump, false jump, operand]. Jumps count from the next instruction.
+  const instructions: [number, number, number, number][] = [
+    [bpf.loadWord, 0, 0, seccompOffset.arch],
+    [bpf.jumpEqual, 1, 0, table.audit],
+    [bpf.returnConstant, 0, 0, seccompAction.killProcess],
+    [bpf.loadWord, 0, 0, seccompOffset.syscall],
+    [bpf.jumpGreaterOrEqual, 0, 1, x32SyscallBit],
+    [bpf.returnConstant, 0, 0, seccompAction.killProcess],
   ]
   // Block socket creation and use of inherited sockets to connect or send to another endpoint.
   // Local AF_UNIX socketpairs can still be used for IPC within the sandbox.
-  const denied = arm ? [198, 200, 202, 203, 242, 269, 117, 270, 271] : [41, 49, 43, 42, 288, 307, 101, 310, 311]
-  // socket, bind, accept, connect, accept4, sendmmsg,
-  // ptrace, process_vm_readv, process_vm_writev.
-  for (const syscall of [...denied, 425, 426, 427]) {
-    instructions.push([0x15, 0, 1, syscall], [0x06, 0, 0, 0x00050001])
+  for (const syscall of [...table.denied, ...ioUringSyscalls]) {
+    instructions.push([bpf.jumpEqual, 0, 1, syscall], [bpf.returnConstant, 0, 0, seccompAction.deny])
   }
   // Bun writes to socket-backed stdio using send(), which Linux implements
   // as sendto() with a null destination. Check both halves of the pointer.
   instructions.push(
-    [0x15, 0, 7, arm ? 206 : 44], // sendto
-    [0x20, 0, 0, 48], // args[4], low word of destination pointer
-    [0x15, 1, 0, 0],
-    [0x06, 0, 0, 0x00050001],
-    [0x20, 0, 0, 52], // high word
-    [0x15, 1, 0, 0],
-    [0x06, 0, 0, 0x00050001],
-    [0x06, 0, 0, 0x7fff0000],
-    [0x15, 0, 3, arm ? 199 : 53], // socketpair
-    [0x20, 0, 0, 16], // first argument
-    [0x15, 1, 0, 1], // AF_UNIX
-    [0x06, 0, 0, 0x00050001],
-    [0x06, 0, 0, 0x7fff0000],
+    [bpf.jumpEqual, 0, 7, table.sendto], // sendto
+    [bpf.loadWord, 0, 0, seccompOffset.sendtoDestinationLow],
+    [bpf.jumpEqual, 1, 0, 0],
+    [bpf.returnConstant, 0, 0, seccompAction.deny],
+    [bpf.loadWord, 0, 0, seccompOffset.sendtoDestinationHigh],
+    [bpf.jumpEqual, 1, 0, 0],
+    [bpf.returnConstant, 0, 0, seccompAction.deny],
+    [bpf.returnConstant, 0, 0, seccompAction.allow],
+    [bpf.jumpEqual, 0, 3, table.socketpair], // socketpair
+    [bpf.loadWord, 0, 0, seccompOffset.firstArgument],
+    [bpf.jumpEqual, 1, 0, AF_UNIX],
+    [bpf.returnConstant, 0, 0, seccompAction.deny],
+    [bpf.returnConstant, 0, 0, seccompAction.allow],
   )
-  const bytes = Buffer.alloc(instructions.length * 8)
+  const instructionSize = 8 // sizeof(struct sock_filter)
+  const bytes = Buffer.alloc(instructions.length * instructionSize)
   for (const [index, [code, yes, no, value]] of instructions.entries()) {
-    bytes.writeUInt16LE(code, index * 8)
-    bytes[index * 8 + 2] = yes
-    bytes[index * 8 + 3] = no
-    bytes.writeUInt32LE(value, index * 8 + 4)
+    bytes.writeUInt16LE(code, index * instructionSize)
+    bytes[index * instructionSize + 2] = yes
+    bytes[index * instructionSize + 3] = no
+    bytes.writeUInt32LE(value, index * instructionSize + 4)
   }
   return Array.from(bytes, (byte) => "\\0" + byte.toString(8).padStart(3, "0")).join("")
 }
@@ -404,6 +467,7 @@ export async function backend(
     readableRoots: (policy) =>
       unique([...runtime, ...policy.readableRoots, ...policy.writableRoots, ...(policy.referenceRoots ?? [])]),
     launch,
-    fileLaunch: SandboxBackend.fileLauncher(launch, trustedPath),
+    fileLaunch: SandboxBackend.posixFileLauncher(launch, trustedPath),
+    probe: SandboxBackend.posixProbe(launch, trustedPath),
   }
 }

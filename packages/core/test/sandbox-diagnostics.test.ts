@@ -2,6 +2,8 @@ import { expect, test } from "bun:test"
 import { SandboxDiagnostics } from "../src/sandbox/diagnostics"
 import { AppProcess } from "@opencode/util/process"
 import { Effect, Layer } from "effect"
+import { SandboxBackend } from "../src/sandbox/backend"
+import { MacSandbox } from "../src/sandbox/macos"
 import { SandboxCheck } from "../src/sandbox/check"
 import { it } from "./lib/effect"
 
@@ -19,12 +21,18 @@ test("sandbox hints distinguish loader, profile and possible permission failures
   expect(SandboxDiagnostics.hint("build failed: unknown identifier")).toBeUndefined()
 })
 
+test("selects Seatbelt explicitly and rejects unimplemented sandbox platforms", async () => {
+  expect((await SandboxBackend.select("darwin", {})).executable).toBe(MacSandbox.executable)
+  await expect(SandboxBackend.select("win32", {})).rejects.toThrow("Windows sandboxing is not implemented")
+  await expect(SandboxBackend.select("freebsd", {})).rejects.toThrow("Sandboxing is unavailable on freebsd")
+})
+
 it.live("startup reports profile and helper failures without attempting an unsandboxed fallback", () =>
   Effect.gen(function* () {
     for (const failAt of [1, 2]) {
       const calls: string[] = []
       const error = yield* Effect.flip(
-        SandboxCheck.run({
+        SandboxCheck.run(MacSandbox.backend(), {
           directory: "/test/workspace",
           scratch: "/test/scratch",
           fullDiskRead: false,

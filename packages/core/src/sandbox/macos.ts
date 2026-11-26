@@ -5,6 +5,7 @@ import { SandboxBackend } from "./backend.js"
 import { SandboxHostPolicy } from "./host-policy.js"
 import type { SandboxPolicy } from "./policy.js"
 
+const trustedPath = "/usr/bin:/bin"
 export const executable = "/usr/bin/sandbox-exec"
 
 // Keep host runtime access separate from workspace grants. In particular, do not grant all of HOME,
@@ -188,4 +189,17 @@ export function launch(
   return { command: executable, args: ["-p", profile, ...parameters, "--", command, ...args], env }
 }
 
-export const fileLaunch = SandboxBackend.fileLauncher(launch)
+export const fileLaunch = SandboxBackend.posixFileLauncher(launch, trustedPath)
+
+export function backend(): SandboxBackend.Interface {
+  return {
+    name: "macOS Seatbelt",
+    executable,
+    trustedPath,
+    policy,
+    readableRoots,
+    launch,
+    fileLaunch,
+    probe: SandboxBackend.posixProbe(launch, trustedPath),
+  }
+}

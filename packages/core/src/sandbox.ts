@@ -9,7 +9,7 @@ import { AppProcess } from "@opencode/util/process"
 import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
 import { Location } from "./location.js"
 import { Reference } from "./reference.js"
-import type { SandboxBackend } from "./sandbox/backend.js"
+import { SandboxBackend } from "./sandbox/backend.js"
 import { SandboxHostPolicy } from "./sandbox/host-policy.js"
 import { SandboxPolicy } from "./sandbox/policy.js"
 import { SandboxGitConfig } from "./sandbox/git-config.js"
@@ -72,19 +72,9 @@ export const settingsConfigured = (input: Options = {}, databasePath?: string) =
       Settings,
       Effect.gen(function* () {
         if (input.enabled !== true) return Settings.of({ ...input })
-        if (process.platform !== "darwin" && process.platform !== "linux")
-          return yield* Effect.die(
-            new UnavailableError({
-              message:
-                "Sandbox startup failed: only local macOS and Linux execution is supported. Disable sandboxing explicitly to run on this host.",
-            }),
-          )
         const global = yield* Global.Service
         const backend = yield* Effect.tryPromise({
-          try: async (): Promise<SandboxBackend.Interface> =>
-            process.platform === "darwin"
-              ? { name: "macOS Seatbelt", ...(await import("./sandbox/macos.js")).MacSandbox }
-              : (await import("./sandbox/linux.js")).LinuxSandbox.backend(input.linux?.binary, input.writableRoots),
+          try: () => SandboxBackend.select(process.platform, input),
           catch: (cause) => new UnavailableError({ message: `Unable to initialize sandbox backend: ${cause}` }),
         }).pipe(Effect.orDie)
         const options = yield* Effect.tryPromise({
@@ -113,7 +103,7 @@ export const settingsConfigured = (input: Options = {}, databasePath?: string) =
               backend.policy({ ...global, directory, scratch }, options, [], options.databasePath),
             )
             const { SandboxCheck } = yield* Effect.promise(() => import("./sandbox/check.js"))
-            yield* SandboxCheck.run(policy, true, backend)
+            yield* SandboxCheck.run(backend, policy)
           }),
         ).pipe(
           Effect.mapError(
@@ -188,7 +178,7 @@ export const configured = (input?: Options) => {
           )
         if (policy && backend) {
           const { SandboxCheck } = yield* Effect.promise(() => import("./sandbox/check.js"))
-          yield* SandboxCheck.run(policy, false, backend).pipe(
+          yield* SandboxCheck.run(backend, policy, false).pipe(
             Effect.mapError(
               (cause) =>
                 new UnavailableError({
@@ -317,7 +307,7 @@ export const configured = (input?: Options) => {
                   { ...current, protectedPaths: [...current.protectedPaths, directory] },
                   binary,
                   [],
-                  { PATH: backend.trustedPath ?? "/usr/bin:/bin", HOME: scratch, TMPDIR: scratch },
+                  { PATH: backend.trustedPath, HOME: scratch, TMPDIR: scratch },
                   cwd,
                 ),
               catch: (cause) => new UnavailableError({ message: `Unable to prepare sandbox search: ${cause}` }),

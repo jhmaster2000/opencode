@@ -5,31 +5,18 @@ import { Effect, Schema } from "effect"
 import { ChildProcess } from "effect/process"
 import { AppProcess } from "@opencode/util/process"
 import type { SandboxBackend } from "./backend.js"
-import { MacSandbox } from "./macos.js"
 import { SandboxFileWorker } from "./file-worker.js"
 import { SandboxFileProtocol } from "./file-protocol.js"
 import type { SandboxPolicy } from "./policy.js"
 
 /** Apply the real profile, then boot the embedded runtime without running project code. */
 export const run = Effect.fn("SandboxCheck.run")(function* (
+  backend: SandboxBackend.Interface,
   policy: SandboxPolicy.Policy,
   helper = true,
-  backend: SandboxBackend.Interface = { name: "macOS Seatbelt", ...MacSandbox },
 ) {
   const subprocess = yield* AppProcess.Service
-  const launch = yield* Effect.tryPromise(async () =>
-    backend.launch(
-      policy,
-      "/bin/sh",
-      ["-c", "exit 0"],
-      {
-        PATH: backend.trustedPath ?? "/usr/bin:/bin",
-        HOME: policy.scratch,
-        TMPDIR: policy.scratch,
-      },
-      policy.directory,
-    ),
-  )
+  const launch = yield* Effect.tryPromise(async () => backend.probe(policy))
   yield* subprocess
     .run(
       ChildProcess.make(launch.command, launch.args, {
