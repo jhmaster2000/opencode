@@ -8,6 +8,7 @@ export interface Options {
   readonly approval?: "on-request" | "never"
   readonly fullDiskRead?: boolean
   readonly allowGitWrites?: boolean
+  readonly linux?: { readonly binary?: string }
   readonly readableRoots?: readonly string[]
   readonly writableRoots?: readonly string[]
 }
@@ -22,6 +23,7 @@ export interface Policy {
   readonly unreadablePaths: readonly string[]
   readonly gitConfigFiles?: readonly string[]
   readonly referenceRoots?: readonly string[]
+  readonly referenceDataDirectory?: string
   readonly referenceDataRoots?: readonly string[]
   readonly referenceDeniedPaths?: readonly string[]
   readonly referenceDeniedPatterns?: readonly string[]
@@ -46,7 +48,7 @@ export function environment(
         ([name]) =>
           (!/^OPENCODE_/i.test(name) || name === "OPENCODE_SESSION_ID") &&
           !/(?:^|_)(?:API_KEY|ACCESS_KEY|TOKEN|SECRET|PASSWORD|CREDENTIALS?|AUTHORIZATION)(?:_|$)/i.test(name) &&
-          !/^(?:CODEX_|DYLD_|BASH_ENV$|ENV$|ZDOTDIR$|NODE_OPTIONS$|BUN_OPTIONS$|SSH_AUTH_SOCK$|GIT_.*COMMAND$)/i.test(
+          !/^(?:CODEX_|DYLD_|LD_|BASH_ENV$|ENV$|ZDOTDIR$|NODE_OPTIONS$|BUN_OPTIONS$|SSH_AUTH_SOCK$|GIT_.*COMMAND$)/i.test(
             name,
           ),
       ),

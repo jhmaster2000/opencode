@@ -4,19 +4,32 @@ import fs from "node:fs/promises"
 import { Effect, Schema } from "effect"
 import { ChildProcess } from "effect/process"
 import { AppProcess } from "@opencode/util/process"
+import type { SandboxBackend } from "./backend.js"
 import { MacSandbox } from "./macos.js"
 import { SandboxFileWorker } from "./file-worker.js"
 import { SandboxFileProtocol } from "./file-protocol.js"
 import type { SandboxPolicy } from "./policy.js"
 
 /** Apply the real profile, then boot the embedded runtime without running project code. */
-export const run = Effect.fn("SandboxCheck.run")(function* (policy: SandboxPolicy.Policy, helper = true) {
+export const run = Effect.fn("SandboxCheck.run")(function* (
+  policy: SandboxPolicy.Policy,
+  helper = true,
+  backend: SandboxBackend.Interface = { name: "macOS Seatbelt", ...MacSandbox },
+) {
   const subprocess = yield* AppProcess.Service
-  const launch = MacSandbox.launch(policy, "/bin/sh", ["-c", "exit 0"], {
-    PATH: "/usr/bin:/bin",
-    HOME: policy.scratch,
-    TMPDIR: policy.scratch,
-  })
+  const launch = yield* Effect.tryPromise(async () =>
+    backend.launch(
+      policy,
+      "/bin/sh",
+      ["-c", "exit 0"],
+      {
+        PATH: backend.trustedPath ?? "/usr/bin:/bin",
+        HOME: policy.scratch,
+        TMPDIR: policy.scratch,
+      },
+      policy.directory,
+    ),
+  )
   yield* subprocess
     .run(
       ChildProcess.make(launch.command, launch.args, {
@@ -36,10 +49,8 @@ export const run = Effect.fn("SandboxCheck.run")(function* (policy: SandboxPolic
       ),
     )
   if (!helper) return
-  const worker = MacSandbox.fileLaunch(
-    policy,
-    yield* Effect.tryPromise(() => fs.realpath(process.execPath)),
-    SandboxFileWorker.configured(policy),
+  const worker = yield* Effect.tryPromise(async () =>
+    backend.fileLaunch(policy, await fs.realpath(process.execPath), SandboxFileWorker.configured(policy)),
   )
   yield* subprocess
     .run(ChildProcess.make(worker.command, worker.args, { cwd: policy.scratch, env: worker.env, extendEnv: false }), {

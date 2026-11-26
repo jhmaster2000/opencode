@@ -9,6 +9,8 @@ import { AppProcess } from "@opencode/util/process"
 import type { ShellCreateBefore } from "@opencode/plugin/effect/shell"
 import { Location } from "./location.js"
 import { Reference } from "./reference.js"
+import type { SandboxBackend } from "./sandbox/backend.js"
+import { SandboxHostPolicy } from "./sandbox/host-policy.js"
 import { SandboxPolicy } from "./sandbox/policy.js"
 import { SandboxGitConfig } from "./sandbox/git-config.js"
 import { ShellSelect } from "./shell/select.js"
@@ -22,6 +24,7 @@ export const Options = Schema.Struct({
   approval: Schema.optional(Schema.Literals(["on-request", "never"])),
   fullDiskRead: Schema.optional(Schema.Boolean),
   allowGitWrites: Schema.optional(Schema.Boolean),
+  linux: Schema.optional(Schema.Struct({ binary: Schema.optional(Schema.String) })),
   readableRoots: Schema.optional(Schema.Array(Schema.String)),
   writableRoots: Schema.optional(Schema.Array(Schema.String)),
 })
@@ -48,16 +51,17 @@ export interface Interface {
   >
   readonly checkLocation: (target: Location.Ref) => Effect.Effect<void, UnavailableError>
   readonly files: Effect.Effect<SandboxFiles.Interface, UnavailableError>
-  readonly search: (command: string) => Effect.Effect<Launch, UnavailableError>
-  readonly command: (input: Launch) => Effect.Effect<Launch, UnavailableError>
+  readonly search: (command: string, cwd?: string) => Effect.Effect<Launch, UnavailableError>
+  readonly command: (input: Launch, cwd?: string) => Effect.Effect<Launch, UnavailableError>
   readonly prepare: (invocation: ShellCreateBefore, escalated: boolean) => Effect.Effect<Launch, UnavailableError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Sandbox") {}
 
-export class Settings extends Context.Service<Settings, Options & { readonly databasePath?: string }>()(
-  "@opencode/Sandbox/Settings",
-) {}
+export class Settings extends Context.Service<
+  Settings,
+  Options & { readonly databasePath?: string; readonly backend?: SandboxBackend.Interface }
+>()("@opencode/Sandbox/Settings") {}
 
 // The server builds this global node before reporting readiness; Location eviction
 // must neither re-resolve configured aliases nor repeat the host runtime probe.
@@ -68,20 +72,27 @@ export const settingsConfigured = (input: Options = {}, databasePath?: string) =
       Settings,
       Effect.gen(function* () {
         if (input.enabled !== true) return Settings.of({ ...input })
-        if (process.platform !== "darwin")
+        if (process.platform !== "darwin" && process.platform !== "linux")
           return yield* Effect.die(
             new UnavailableError({
               message:
-                "Sandbox startup failed: only local macOS execution is supported. Disable sandboxing explicitly to run on this host.",
+                "Sandbox startup failed: only local macOS and Linux execution is supported. Disable sandboxing explicitly to run on this host.",
             }),
           )
         const global = yield* Global.Service
-        const { MacSandbox } = yield* Effect.promise(() => import("./sandbox/macos.js"))
+        const backend = yield* Effect.tryPromise({
+          try: async (): Promise<SandboxBackend.Interface> =>
+            process.platform === "darwin"
+              ? { name: "macOS Seatbelt", ...(await import("./sandbox/macos.js")).MacSandbox }
+              : (await import("./sandbox/linux.js")).LinuxSandbox.backend(input.linux?.binary, input.writableRoots),
+          catch: (cause) => new UnavailableError({ message: `Unable to initialize sandbox backend: ${cause}` }),
+        }).pipe(Effect.orDie)
         const options = yield* Effect.tryPromise({
           try: async () => ({
             ...input,
-            readableRoots: await MacSandbox.roots(input.readableRoots ?? []),
-            writableRoots: await MacSandbox.roots(input.writableRoots ?? []),
+            backend,
+            readableRoots: await SandboxHostPolicy.roots(input.readableRoots ?? []),
+            writableRoots: await SandboxHostPolicy.roots(input.writableRoots ?? []),
             databasePath:
               databasePath && databasePath !== ":memory:" ? path.resolve(global.data, databasePath) : undefined,
           }),
@@ -97,18 +108,18 @@ export const settingsConfigured = (input: Options = {}, databasePath?: string) =
               (directory) => Effect.promise(() => fs.rm(directory, { recursive: true, force: true })),
             )
             const directory = path.join(scratch, "workspace")
-            yield* Effect.tryPromise(() => fs.mkdir(directory))
+            yield* Effect.tryPromise(() => Promise.all([fs.mkdir(directory), fs.mkdir(path.join(scratch, ".runtime"))]))
             const policy = yield* Effect.tryPromise(() =>
-              MacSandbox.policy({ ...global, directory, scratch }, options, [], options.databasePath),
+              backend.policy({ ...global, directory, scratch }, options, [], options.databasePath),
             )
             const { SandboxCheck } = yield* Effect.promise(() => import("./sandbox/check.js"))
-            yield* SandboxCheck.run(policy)
+            yield* SandboxCheck.run(policy, true, backend)
           }),
         ).pipe(
           Effect.mapError(
             (cause) =>
               new UnavailableError({
-                message: `Sandbox startup check failed: ${cause instanceof Error ? cause.message : cause}. Check /usr/bin/sandbox-exec, runtime access and whether the parent process permits Seatbelt profiles. No unsandboxed fallback was used.`,
+                message: `Sandbox startup check failed: ${cause instanceof Error ? cause.message : cause}. Check the ${backend.name} prerequisites and runtime access. No unsandboxed fallback was used.`,
               }),
           ),
           Effect.orDie,
@@ -136,11 +147,11 @@ export const configured = (input?: Options) => {
         const approval = options.approval ?? "on-request"
         const unavailable =
           enabled && location.workspaceID !== undefined
-            ? new UnavailableError({ message: "Sandboxed operations require a local macOS execution host." })
+            ? new UnavailableError({ message: "Sandboxed operations require a supported local execution host." })
             : undefined
         // Scratch lives as long as this Location, including its background jobs.
         const scratch =
-          enabled && process.platform === "darwin" && location.workspaceID === undefined
+          enabled && options.backend && location.workspaceID === undefined
             ? yield* Effect.acquireRelease(
                 Effect.tryPromise({
                   try: () => fs.mkdtemp(path.join(global.tmp, "sandbox-")),
@@ -150,7 +161,8 @@ export const configured = (input?: Options) => {
                 (directory) => Effect.promise(() => fs.rm(directory, { recursive: true, force: true })),
               )
             : undefined
-        const backend = scratch ? yield* Effect.promise(() => import("./sandbox/macos.js")) : undefined
+        if (scratch) yield* Effect.tryPromise(() => fs.mkdir(path.join(scratch, ".runtime"))).pipe(Effect.orDie)
+        const backend = scratch ? options.backend : undefined
         const gitConfigFiles = scratch
           ? yield* SandboxGitConfig.discover(location.directory, SandboxPolicy.environment(process.env, scratch))
           : []
@@ -160,7 +172,7 @@ export const configured = (input?: Options) => {
           backend && scratch
             ? yield* Effect.tryPromise({
                 try: () =>
-                  backend.MacSandbox.policy(
+                  backend.policy(
                     { ...global, directory: location.directory, scratch },
                     options,
                     gitConfigFiles,
@@ -172,11 +184,11 @@ export const configured = (input?: Options) => {
 
         if (enabled && !unavailable && (!backend || !policy || !scratch))
           return yield* Effect.die(
-            new UnavailableError({ message: "Sandboxed Locations require a local macOS execution host." }),
+            new UnavailableError({ message: "Sandboxed Locations require a supported local execution host." }),
           )
-        if (policy) {
+        if (policy && backend) {
           const { SandboxCheck } = yield* Effect.promise(() => import("./sandbox/check.js"))
-          yield* SandboxCheck.run(policy, false).pipe(
+          yield* SandboxCheck.run(policy, false, backend).pipe(
             Effect.mapError(
               (cause) =>
                 new UnavailableError({
@@ -227,7 +239,7 @@ export const configured = (input?: Options) => {
                   return resolved
                 }),
               )
-              return backend.MacSandbox.references(
+              return SandboxHostPolicy.references(
                 policy,
                 global,
                 roots.filter((root): root is string => root !== undefined),
@@ -243,11 +255,10 @@ export const configured = (input?: Options) => {
             Effect.tryPromise({
               try: async () => {
                 if (!enabled || !backend || !policy || !scratch)
-                  throw new Error("Confined search requires a local macOS execution host")
-                await fs.access(backend.MacSandbox.executable, fs.constants.X_OK)
+                  throw new Error("Confined search requires a supported local execution host")
+                await fs.access(backend.executable, fs.constants.X_OK)
                 // The managed binary can live under host state, which is intentionally unreadable.
                 // Copy this one trusted executable into private scratch; never grant the state directory.
-                await fs.mkdir(path.join(scratch, ".runtime"), { recursive: true })
                 const directory = await fs.mkdtemp(path.join(scratch, ".runtime", "search-"))
                 const binary = path.join(directory, "rg")
                 await fs.copyFile(await fs.realpath(command), binary)
@@ -258,18 +269,21 @@ export const configured = (input?: Options) => {
             }),
         })
 
-        const command = Effect.fn("Sandbox.command")(function* (input: Launch) {
+        const command = Effect.fn("Sandbox.command")(function* (input: Launch, cwd?: string) {
           if (!enabled || !backend || !policy || !scratch)
-            return yield* new UnavailableError({ message: "Command sandboxing requires a local macOS execution host." })
+            return yield* new UnavailableError({
+              message: "Command sandboxing requires a supported local execution host.",
+            })
           const current = yield* effectivePolicy()
           return yield* Effect.tryPromise({
             try: async () => {
-              await fs.access(backend.MacSandbox.executable, fs.constants.X_OK)
-              return backend.MacSandbox.launch(
+              await fs.access(backend.executable, fs.constants.X_OK)
+              return backend.launch(
                 current,
                 input.command,
                 input.args,
                 SandboxPolicy.environment(input.env, scratch),
+                cwd,
               )
             },
             catch: (cause) => new UnavailableError({ message: `Unable to prepare command sandbox: ${cause}` }),
@@ -290,21 +304,24 @@ export const configured = (input?: Options) => {
               escalation: current ? approval : "disabled",
               writableRoots: current?.writableRoots ?? [],
               readableRoots:
-                current && backend
-                  ? [...backend.MacSandbox.readableRoots(current), ...(current.gitConfigFiles ?? [])]
-                  : [],
+                current && backend ? [...backend.readableRoots(current), ...(current.gitConfigFiles ?? [])] : [],
             }
           }),
-          search: Effect.fn("Sandbox.search")(function* (command) {
+          search: Effect.fn("Sandbox.search")(function* (command, cwd) {
             if (!backend || !scratch) return yield* new UnavailableError({ message: "Sandbox search is unavailable." })
             const current = yield* effectivePolicy()
             const { binary, directory } = yield* Cache.get(searches, command)
-            return backend.MacSandbox.launch(
-              { ...current, protectedPaths: [...current.protectedPaths, directory] },
-              binary,
-              [],
-              { PATH: "/usr/bin:/bin", HOME: scratch, TMPDIR: scratch },
-            )
+            return yield* Effect.tryPromise({
+              try: async () =>
+                backend.launch(
+                  { ...current, protectedPaths: [...current.protectedPaths, directory] },
+                  binary,
+                  [],
+                  { PATH: backend.trustedPath ?? "/usr/bin:/bin", HOME: scratch, TMPDIR: scratch },
+                  cwd,
+                ),
+              catch: (cause) => new UnavailableError({ message: `Unable to prepare sandbox search: ${cause}` }),
+            })
           }),
           command,
           checkLocation: Effect.fn("Sandbox.checkLocation")(function* (target: Location.Ref) {
@@ -326,15 +343,15 @@ export const configured = (input?: Options) => {
           files: Effect.gen(function* () {
             if (!enabled || !backend || !policy || !scratch)
               return yield* new UnavailableError({
-                message: "Confined file operations require sandboxing on a local macOS execution host.",
+                message: "Confined file operations require sandboxing on a supported local execution host.",
               })
             const { SandboxFiles } = yield* Effect.promise(() => import("./sandbox/files.js"))
             const { SandboxFileWorker } = yield* Effect.promise(() => import("./sandbox/file-worker.js"))
             const current = yield* effectivePolicy()
             const launch = yield* Effect.tryPromise({
               try: async () => {
-                await fs.access(backend.MacSandbox.executable, fs.constants.X_OK)
-                return backend.MacSandbox.fileLaunch(
+                await fs.access(backend.executable, fs.constants.X_OK)
+                return backend.fileLaunch(
                   current,
                   await fs.realpath(process.execPath),
                   SandboxFileWorker.configured(current),
@@ -349,7 +366,9 @@ export const configured = (input?: Options) => {
             if (!enabled)
               return yield* new UnavailableError({ message: "Shell sandboxing is not enabled on this server." })
             if (!backend || !policy || !scratch)
-              return yield* new UnavailableError({ message: "Shell sandboxing requires a local macOS execution host." })
+              return yield* new UnavailableError({
+                message: "Shell sandboxing requires a supported local execution host.",
+              })
             if (escalated && approval === "never")
               return yield* new UnavailableError({ message: "Sandbox escalation is disabled by the server." })
             const current = escalated ? policy : yield* effectivePolicy()
@@ -359,8 +378,8 @@ export const configured = (input?: Options) => {
                 const args = ShellSelect.args(command, invocation.command)
                 const env = SandboxPolicy.environment(invocation.env, scratch)
                 if (escalated) return { command, args, env }
-                await fs.access(backend.MacSandbox.executable, fs.constants.X_OK)
-                return backend.MacSandbox.launch(current, command, args, env)
+                await fs.access(backend.executable, fs.constants.X_OK)
+                return backend.launch(current, command, args, env, invocation.cwd)
               },
               catch: (cause) => new UnavailableError({ message: `Unable to prepare shell sandbox: ${cause}` }),
             })

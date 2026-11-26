@@ -51,7 +51,7 @@ void (async () => {
       if (!writePolicy || !["write", "remove"].includes(request.operation)) fail("Invalid write preflight");
       const contains = (root, target) => { const relative = path.relative(root, target); return relative === "" || (relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative)); };
       // Resolve existing parents inside the helper, including aliases above missing paths.
-      // This check does not reserve paths; Seatbelt checks again at the actual mutation.
+      // This check does not reserve paths; the OS sandbox checks again at the actual mutation.
       const resolve = async (value) => {
         try { return await fs.realpath(value); }
         catch (error) {
@@ -71,7 +71,9 @@ void (async () => {
         ? path.join(await resolve(path.dirname(lexical)), path.basename(lexical))
         : await resolve(lexical);
       for (const value of [lexical, canonical]) {
-        if (!writePolicy.writableRoots.some((root) => contains(root, value)) ||
+        const workspaceGit = !writePolicy.allowGitWrites && contains(writePolicy.directory, value) &&
+          path.relative(writePolicy.directory, value).split(path.sep).includes(".git");
+        if (workspaceGit || !writePolicy.writableRoots.some((root) => contains(root, value)) ||
             writePolicy.protectedPaths.some((root) => contains(root, value)) ||
             writePolicy.unreadablePaths.some((root) => contains(root, value)) ||
             (request.operation === "remove" && (writePolicy.writableRoots.includes(value) || writePolicy.protectedPaths.some((root) => contains(value, root)))))

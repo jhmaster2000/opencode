@@ -132,7 +132,7 @@ const make = (sandbox?: Sandbox.Interface) =>
         Effect.gen(function* () {
           // Hosted environments will resolve rg through their driver image; the spawner is the execution seam.
           const executable = yield* sandbox?.enabled ? binary.standalone : binary.filepath
-          const launch = sandbox?.enabled ? yield* sandbox.search(executable) : undefined
+          const launch = sandbox?.enabled ? yield* sandbox.search(executable, input.cwd) : undefined
           const handle = yield* input.environment.spawner.spawn(
             ChildProcess.make(launch?.command ?? executable, [...(launch?.args ?? []), ...input.args], {
               cwd: input.cwd,

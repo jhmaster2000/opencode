@@ -17,7 +17,7 @@ export const run = Effect.fn("FormatterProcess.run")(function* (input: {
     args: input.command.slice(1),
     env: { ...process.env, ...input.environment },
   }
-  const confined = input.sandbox.enabled ? yield* input.sandbox.command(launch) : undefined
+  const confined = input.sandbox.enabled ? yield* input.sandbox.command(launch, input.directory) : undefined
   return yield* input.processes.run(
     ChildProcess.make(confined?.command ?? launch.command, confined?.args ?? launch.args, {
       cwd: input.directory,

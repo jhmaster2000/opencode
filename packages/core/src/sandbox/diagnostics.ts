@@ -6,6 +6,8 @@ export function hint(output: string) {
     return "Runtime loader failure while sandboxed. Check the executable and its library dependencies; dependencies outside the default runtime roots need experimental.sandbox.readable_roots or full_disk_read in global configuration."
   if (/sandbox-exec:.*(?:sandbox_apply|sandbox_init|syntax error|invalid profile|failed)/i.test(output))
     return "The macOS sandbox could not apply its profile. Check sandbox availability and the server logs; this command was not retried outside the sandbox."
+  if (/^bwrap:|isolated procfs mount|bubblewrap is unavailable/im.test(output))
+    return "The Linux sandbox could not start. Check Bubblewrap, user namespace and procfs support, and the server logs."
   if (/operation not permitted|permission denied|sandbox.*(?:deny|denied|blocked)/i.test(output))
     return "Permission denial reported while sandboxed. This may be the sandbox or normal account permissions. Inspect any partial effects before requesting a separate approved shell invocation."
 }

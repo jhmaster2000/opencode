@@ -2,7 +2,7 @@
 title: "Sandbox"
 ---
 
-The experimental execution sandbox confines built-in agent commands, file operations, searches, image file access, and automatic formatters using macOS Seatbelt. It is disabled by default and currently supports local macOS execution only.
+The experimental execution sandbox confines built-in agent commands, file operations, searches, image file access, and automatic formatters using macOS Seatbelt or Linux Bubblewrap and seccomp. It is disabled by default and applies to local execution.
 
 ## Enable the sandbox
 
@@ -26,17 +26,18 @@ The additional readable root is optional. Settings apply when the server starts.
 | `enabled` | `false` | Set to `true` to enable. |
 | `approval` | `on-request` | Set to `never` to prohibit requests for sandbox escapes and workspace changes. |
 | `full_disk_read` | `false` | Allow broad disk reads, subject to [read exclusions](#read-exclusions). |
+| `linux.binary` | Unset | Absolute path to a custom Bubblewrap executable on Linux. Overrides system discovery. |
 | `allow_git_writes` | `false` | Allow writes to `.git` metadata inside the workspace, including nested repositories and submodules. |
 | `readable_roots` | `[]` | Additional existing absolute paths that may be read. |
 | `writable_roots` | `[]` | Additional existing absolute paths that may be written. |
 
-The embedded server accepts equivalent `sandbox` startup options. Unsupported hosts refuse to start with sandboxing enabled. On macOS, remote workspaces can open, but operations that require sandboxing, including shell and confined file tools, are unavailable there.
+The embedded server accepts equivalent `sandbox` startup options. Unsupported hosts refuse to start with sandboxing enabled. On supported hosts, remote workspaces can open, but operations that require sandboxing, including shell and confined file tools, are unavailable there.
 
 ## Behavior
 
 Commands and their descendants can write to the workspace, sandbox scratch, and configured writable roots, except protected metadata and credentials. Reads are restricted to those roots, configured readable roots, registered [references](/references), and system/runtime paths. References are trusted read grants, including repositories cloned into OpenCode's data directory; their contents may be read by the agent without a separate sandbox approval. Registering a reference does not grant write access or remove existing write access: a reference inside the workspace or another writable root remains writable unless separately protected. [Read exclusions](#read-exclusions) still apply. The default runtime grants include `/private/etc`, `/Library/Preferences`, and selected Homebrew installation directories under `/opt/homebrew`; they can contain configuration readable by your account. Broad reads expose more of the account's files, so opt in only when appropriate. Command network access is blocked.
 
-By default, the sandbox protects `.git` metadata at every level of the workspace. Set `allow_git_writes` to `true` to allow commands such as `git add`, `git commit`, and branch checkouts to update that metadata.
+By default, the sandbox protects `.git` metadata at every level of the workspace. On Linux, the protection covers the workspace root and nested Git metadata found **before each launch**, including linked Git directories. Bubblewrap cannot apply this path rule to a new nested `.git` created during the same command. Review newly created repositories before running host Git commands in them. Set `allow_git_writes` to `true` to allow commands such as `git add`, `git commit`, and branch checkouts to update that metadata.
 
 ```jsonc
 {
@@ -71,7 +72,19 @@ This list describes the current implementation and may not be authoritative; exc
 
 Run `opencode debug sandbox --standalone`, or `opencode debug sandbox --server <url>` to inspect a running server. The TUI Status view reports the connected server's effective policy. When disconnected or connected to an older server, enforcement is unknown.
 
-Configured roots must be existing absolute paths. Startup fails if Seatbelt cannot apply the policy or the sandbox file runtime cannot start. For a program that cannot load its libraries, grant the necessary installation path as a readable root or opt into broad reads. A permission-denial hint on a failed command is advisory: the cause can be the sandbox or ordinary account permissions.
+Configured roots must be existing absolute paths. Startup fails if the OS cannot apply the policy or the sandbox file runtime cannot start. For a program that cannot load its libraries, grant the necessary installation path as a readable root or opt into broad reads. A permission-denial hint on a failed command is advisory: the cause can be the sandbox or ordinary account permissions.
+
+## Linux prerequisites
+
+Linux requires a compatible system Bubblewrap (`bwrap`) and a host that permits unprivileged user, mount, PID, IPC, and network namespaces and a fresh sandbox procfs. Install Bubblewrap through your distribution. OpenCode probes standard system install paths first and fails sandbox startup if it cannot run a usable binary.
+
+Set `experimental.sandbox.linux.binary` in your global `opencode.json[c]` to the absolute path of a custom executable. This overrides discovery. If the configured binary fails its startup probe, sandbox startup fails. OpenCode protects the custom binary and its containing path within writable roots against sandboxed writes.
+
+OpenCode releases do not ship Bubblewrap. Without an override, the system probe can fall back to a manually supplied executable named `bwrap` in `opencode-sandbox/` next to the OpenCode binary. Keep this fallback outside all sandbox-writable roots.
+
+Use a disposable workspace for Linux testing. Bubblewrap may leave empty mount targets on disk when it protects paths that did not exist at launch.
+
+Run `bun run --cwd packages/core test:sandbox` to validate enforcement on Linux. To validate a compiled Bun CLI end to end, run `bun run --cwd packages/cli script/sandbox-smoke.ts /absolute/path/to/opencode`.
 
 ## Scope and limitations
 

@@ -2656,6 +2656,7 @@ export type ConfigEntry =
             approval?: "on-request" | "never"
             full_disk_read?: boolean
             allow_git_writes?: boolean
+            linux?: { binary?: string }
             readable_roots?: Array<string>
             writable_roots?: Array<string>
           }

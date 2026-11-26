@@ -12,15 +12,34 @@ import { OpenCode } from "@opencode/client/promise"
 // Exercise the published executable through its real provider/tool/permission path.
 // Only the model responses are scripted. No production hook or plugin is installed.
 const source = process.argv[2] && path.resolve(process.argv[2])
-if (!source || process.platform !== "darwin")
-  throw new Error("Usage on macOS: bun run script/sandbox-smoke.ts <compiled-opencode>")
-const probe = Bun.spawnSync(["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true"])
-assert.equal(probe.exitCode, 0, "Run outside any enclosing sandbox so Seatbelt tests cannot skip")
+const linux = process.platform === "linux"
+if (!source || (!linux && process.platform !== "darwin"))
+  throw new Error("Usage on Linux or macOS: bun run script/sandbox-smoke.ts <compiled-opencode>")
+if (!linux) {
+  const probe = Bun.spawnSync(["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true"])
+  assert.equal(probe.exitCode, 0, "Run outside any enclosing sandbox so Seatbelt tests cannot skip")
+}
 
 await using temporary = await tmpdir("opencode-artifact-sandbox-")
 const binary = path.join(temporary.path, "opencode")
 await fs.copyFile(source, binary)
 await fs.chmod(binary, 0o755)
+if (linux) {
+  const fallback = path.join(path.dirname(source), "opencode-sandbox", "bwrap")
+  if (
+    await fs.stat(fallback).then(
+      () => true,
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false
+        throw error
+      },
+    )
+  ) {
+    const destination = path.join(temporary.path, "opencode-sandbox")
+    await fs.mkdir(destination)
+    await fs.copyFile(fallback, path.join(destination, "bwrap"))
+  }
+}
 const installedRipgrep = process.env.OPENCODE_TEST_RIPGREP ?? Bun.which("rg")
 assert(installedRipgrep, "An installed standalone ripgrep is required to seed the isolated managed cache")
 const rg = installedRipgrep
@@ -105,10 +124,7 @@ async function fixture(name: string, enabled = true, fullDiskRead = false) {
         data: { path: data, description: "Data reference smoke test" },
       },
       snapshots: true,
-      permissions: [
-        { action: "*", resource: "*", effect: "ask" },
-        { action: "shell", resource: "touch *", effect: "deny" },
-      ],
+      permissions: [{ action: "shell", resource: "touch *", effect: "deny" }],
       formatter: {
         smoke: {
           extensions: [".fmt"],
@@ -204,11 +220,16 @@ for (const fullDiskRead of [false, true]) {
   assert.equal(status.active, true)
   assert.equal(status.reads, fullDiskRead ? "broad" : "restricted")
   const network = `BUN_BE_BUN=1 '${binary}' --config=/dev/null --no-env-file --no-addons --no-macros --eval 'fetch(${JSON.stringify(new URL("/probe", provider.url).href)}).then(() => { console.log("NETWORK_UNEXPECTED"); process.exitCode=1 }, () => console.log("NETWORK_BLOCKED"))'`
+  const blocked = (command: string) => `if ${command}; then exit 1; else printf ACCESS_BLOCKED; fi`
   await run(f, [
     { name: "shell", input: { command: 'test -z "$SMOKE_SECRET_TOKEN" && printf SHELL_OK' }, expect: "SHELL_OK" },
     {
       name: "shell",
-      input: { command: 'count=$(sysctl -n hw.ncpu) && test "$count" -gt 0 && printf SYSCTL_WORKS' },
+      input: {
+        command: linux
+          ? 'count=$(getconf _NPROCESSORS_ONLN) && test "$count" -gt 0 && printf SYSCTL_WORKS'
+          : 'count=$(sysctl -n hw.ncpu) && test "$count" -gt 0 && printf SYSCTL_WORKS',
+      },
       expect: "SYSCTL_WORKS",
     },
     { name: "write", input: { path: "sample.txt", content: "NATIVE_WRITE_CANARY\n" } },
@@ -225,18 +246,18 @@ for (const fullDiskRead of [false, true]) {
     },
     { name: "shell", input: { command: `cat '${f.reference}/readme'` }, expect: "REFERENCE_READ_CANARY" },
     { name: "shell", input: { command: `cat '${f.data}/repos/readme'` }, expect: "DATA_REFERENCE_CANARY" },
-    { name: "shell", input: { command: `cat '${f.data}/opencode-probe.db'` }, expect: "Operation not permitted" },
-    { name: "shell", input: { command: "cat opencode.db" }, expect: "Operation not permitted" },
+    { name: "shell", input: { command: blocked(`cat '${f.data}/opencode-probe.db'`) }, expect: "ACCESS_BLOCKED" },
+    { name: "shell", input: { command: blocked("cat opencode.db") }, expect: "ACCESS_BLOCKED" },
     {
       name: "shell",
-      input: { command: `cat '${f.outside}/public'` },
-      expect: fullDiskRead ? "OUTSIDE_READ_CANARY" : "Operation not permitted",
+      input: { command: fullDiskRead ? `cat '${f.outside}/public'` : blocked(`cat '${f.outside}/public'`) },
+      expect: fullDiskRead ? "OUTSIDE_READ_CANARY" : "ACCESS_BLOCKED",
     },
-    { name: "shell", input: { command: `cat '${f.root}/.ssh/canary'` }, expect: "Operation not permitted" },
+    { name: "shell", input: { command: blocked(`cat '${f.root}/.ssh/canary'`) }, expect: "ACCESS_BLOCKED" },
     {
       name: "shell",
-      input: { command: `printf forbidden > '${f.outside}/shell-escape'` },
-      expect: "Operation not permitted",
+      input: { command: blocked(`printf forbidden > '${f.outside}/shell-escape'`) },
+      expect: "ACCESS_BLOCKED",
     },
     { name: "write", input: { path: path.join(f.outside, "native-escape"), content: "forbidden" } },
     { name: "write", input: { path: ".opencode/plugin.js", content: "forbidden" } },

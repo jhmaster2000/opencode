@@ -8,7 +8,7 @@ import { ConfigPolicy } from "./policy.js"
 
 export const Sandbox = Schema.Struct({
   enabled: Schema.Boolean.pipe(optional).annotate({
-    description: "Enable the sandbox. Defaults to false; supported on local macOS.",
+    description: "Enable the sandbox. Defaults to false; supported on local macOS and Linux.",
   }),
   approval: Schema.Literals(["on-request", "never"]).pipe(optional).annotate({
     description: "Allow sandbox escape requests or prohibit them. Defaults to on-request.",
@@ -19,6 +19,11 @@ export const Sandbox = Schema.Struct({
   allow_git_writes: Schema.Boolean.pipe(optional).annotate({
     description: "Allow writes to .git metadata within the workspace. Defaults to false.",
   }),
+  linux: Schema.Struct({
+    binary: Schema.String.pipe(optional).annotate({
+      description: "Absolute path to a custom Bubblewrap executable on Linux. Overrides system discovery.",
+    }),
+  }).pipe(optional),
   readable_roots: Schema.Array(Schema.String).pipe(optional).annotate({
     description: "Additional existing absolute paths the sandbox may read.",
   }),

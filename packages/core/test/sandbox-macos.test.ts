@@ -203,7 +203,7 @@ remote.effect("remote locations initialize but cannot prepare a sandboxed shell 
     const error = yield* Effect.flip(
       sandbox.prepare({ command: "pwd", cwd: "/remote", shell: "/bin/sh", timeout: 0, env: {} }, false),
     )
-    expect(error.message).toContain("Shell sandboxing requires a local macOS execution host")
+    expect(error.message).toContain("Shell sandboxing requires a supported local execution host")
   }),
 )
 
