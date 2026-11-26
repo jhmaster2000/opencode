@@ -86,6 +86,12 @@ Use a disposable workspace for Linux testing. Bubblewrap may leave empty mount t
 
 Run `bun run --cwd packages/core test:sandbox` to validate enforcement on Linux. To validate a compiled Bun CLI end to end, run `bun run --cwd packages/cli script/sandbox-smoke.ts /absolute/path/to/opencode`.
 
+## Web access
+
+With the sandbox enabled, `webfetch` and `websearch` ask for approval by default. Code Mode `fetch()` uses the same `webfetch` permission. These requests run through OpenCode's server and can reach the network independently of the shell sandbox.
+
+Explicit matching permission rules still apply, including wildcard rules. To allow fetches without a prompt, for example, add `{ "action": "webfetch", "resource": "*", "effect": "allow" }` to your `permissions` list. Add a separate rule for `websearch` to allow searches. With sandboxing disabled, both tools keep their usual default of `allow`.
+
 ## Scope and limitations
 
 The sandbox is a boundary around the covered agent operations, not the entire OpenCode server. Configured providers, web and Code Mode HTTP, MCP services, trusted executable plugins, and human-operated terminals and host APIs retain their own authority. Approved escapes intentionally run outside the sandbox. CPU, memory, and process-count quotas are not provided. See the repository's [authority audit](https://github.com/anomalyco/opencode/blob/dev/SANDBOX_AUDIT.md) for implementation details.

@@ -77,13 +77,19 @@ export const Plugin = define({
           'Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?"). When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.'
         item.system = PROMPT_EXPLORE
         item.mode = "subagent"
+        // Preserve the runtime's web defaults across Explore's catch-all deny.
+        const web = (["webfetch", "websearch"] as const).map((action) => ({
+          action,
+          resource: "*",
+          effect:
+            item.permissions.findLast((rule) => rule.action === action && rule.resource === "*")?.effect ?? "allow",
+        }))
         item.permissions.push(
           { action: "*", resource: "*", effect: "deny" },
           { action: "shell", resource: "*", effect: "allow" },
           { action: "grep", resource: "*", effect: "allow" },
           { action: "glob", resource: "*", effect: "allow" },
-          { action: "webfetch", resource: "*", effect: "allow" },
-          { action: "websearch", resource: "*", effect: "allow" },
+          ...web,
           { action: "read", resource: "*", effect: "allow" },
           { action: "read", resource: "*.env", effect: "ask" },
           { action: "read", resource: "*.env.*", effect: "ask" },

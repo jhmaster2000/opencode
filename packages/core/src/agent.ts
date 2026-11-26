@@ -5,6 +5,7 @@ import { Array, Context, Effect, Layer, Types } from "effect"
 import { Agent } from "@opencode/schema/agent"
 import { Bus } from "./bus.js"
 import { State } from "./state.js"
+import { Sandbox } from "./sandbox.js"
 
 export const ID = Agent.ID
 export type ID = typeof ID.Type
@@ -50,6 +51,7 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const bus = yield* Bus.Service
+    const sandbox = yield* Sandbox.Settings
     const selectable = (agent: Info | undefined) =>
       agent && agent.mode !== "subagent" && !agent.hidden ? agent : undefined
     const selectedDefault = (data: Data) => {
@@ -79,7 +81,14 @@ const layer = Layer.effect(
         },
         update: (id, fn) => {
           const current = editor.agents.get(id) ?? (Info.default(id) as Types.DeepMutable<Info>)
-          if (!editor.agents.has(id)) editor.agents.set(id, current)
+          if (!editor.agents.has(id)) {
+            if (sandbox.enabled)
+              current.permissions.push(
+                { action: "webfetch", resource: "*", effect: "ask" },
+                { action: "websearch", resource: "*", effect: "ask" },
+              )
+            editor.agents.set(id, current)
+          }
           fn(current)
           current.id = id
         },
@@ -112,4 +121,4 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer, deps: [Bus.node] })
+export const node = makeLocationNode({ service: Service, layer, deps: [Bus.node, Sandbox.settingsNode] })

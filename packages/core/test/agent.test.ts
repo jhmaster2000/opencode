@@ -8,6 +8,7 @@ import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Location } from "@opencode/core/location"
 import { Permission } from "@opencode/core/permission"
 import { AgentPlugin } from "@opencode/core/plugin/agent"
+import { Sandbox } from "@opencode/core/sandbox"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Global } from "@opencode/util/global"
 import { location } from "./fixture/location"
@@ -25,6 +26,42 @@ const it = testEffect(
     Location.node.replace(locationLayer),
   ]) as unknown as Layer.Layer<unknown, never>,
 )
+
+for (const enabled of [false, true]) {
+  const web = testEffect(
+    AppNodeBuilder.build(LayerNode.group([Agent.node, Bus.node, Location.node]), [
+      Global.node.replace(globalLayer),
+      Location.node.replace(locationLayer),
+      Sandbox.settingsNode.replace(Layer.succeed(Sandbox.Settings, { enabled })),
+    ]) as unknown as Layer.Layer<unknown, never>,
+  )
+  web.effect(`applies web permission defaults with sandbox enabled=${enabled}`, () =>
+    Effect.gen(function* () {
+      const agent = yield* Agent.Service
+      yield* AgentPlugin.Plugin.effect(host({ agent: agentHost(agent) }))
+      const custom = Agent.ID.make("custom-web")
+      yield* agent.transform((editor) =>
+        editor.update(custom, (info) => {
+          info.permissions.push(
+            { action: "webfetch", resource: "https://example.com/*", effect: "allow" },
+            { action: "websearch", resource: "private", effect: "deny" },
+          )
+        }),
+      )
+
+      for (const id of ["build", "general", "explore", "custom-web"]) {
+        const rules = (yield* agent.get(Agent.ID.make(id)))?.permissions ?? []
+        expect(Permission.evaluate("webfetch", "https://other.example/", rules).effect).toBe(enabled ? "ask" : "allow")
+        expect(Permission.evaluate("websearch", "public", rules).effect).toBe(enabled ? "ask" : "allow")
+      }
+      const rules = (yield* agent.get(custom))?.permissions ?? []
+      expect(Permission.evaluate("webfetch", "https://example.com/page", rules).effect).toBe("allow")
+      expect(Permission.evaluate("websearch", "private", rules).effect).toBe("deny")
+      const title = (yield* agent.get(Agent.ID.make("title")))?.permissions ?? []
+      expect(Permission.evaluate("webfetch", "https://example.com/page", title).effect).toBe("deny")
+    }),
+  )
+}
 
 describe("Agent", () => {
   it.effect("publishes an updated event after agent changes", () =>
