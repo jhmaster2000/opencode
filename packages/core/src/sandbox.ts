@@ -200,11 +200,17 @@ export const configured = (input?: Options) => {
               const roots = await Promise.all(
                 entries.map(async (entry) => {
                   const pinned = pinnedReferences.get(entry.path)
-                  if (pinned?.missing) return pinned.root
                   const resolved = await fs.realpath(entry.path).catch((error: NodeJS.ErrnoException) => {
                     if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined
                     throw error
                   })
+                  // A missing grant can become a directory in place, but a new
+                  // symlink must never redirect it to a different host path.
+                  if (pinned?.missing) {
+                    if (!resolved) return pinned.root
+                    if (resolved !== pinned.root || !(await fs.stat(resolved)).isDirectory()) return undefined
+                    return pinned.root
+                  }
                   if (!resolved) {
                     let parent = path.dirname(entry.path)
                     while (true) {
@@ -229,11 +235,18 @@ export const configured = (input?: Options) => {
                   return resolved
                 }),
               )
-              return SandboxHostPolicy.references(
+              const grants = await SandboxHostPolicy.references(
                 policy,
                 global,
                 roots.filter((root): root is string => root !== undefined),
               )
+              const aliases = entries.flatMap((entry, index) => {
+                const target = roots[index]
+                return target && target !== entry.path && pinnedReferences.get(entry.path)?.missing === false
+                  ? [{ path: entry.path, target }]
+                  : []
+              })
+              return { ...grants, referenceAliases: aliases }
             },
             catch: (cause) => new UnavailableError({ message: `Unable to prepare reference access: ${cause}` }),
           })
@@ -337,19 +350,22 @@ export const configured = (input?: Options) => {
               })
             const { SandboxFiles } = yield* Effect.promise(() => import("./sandbox/files.js"))
             const { SandboxFileWorker } = yield* Effect.promise(() => import("./sandbox/file-worker.js"))
-            const current = yield* effectivePolicy()
-            const launch = yield* Effect.tryPromise({
-              try: async () => {
-                await fs.access(backend.executable, fs.constants.X_OK)
-                return backend.fileLaunch(
-                  current,
-                  await fs.realpath(process.execPath),
-                  SandboxFileWorker.configured(current),
-                )
-              },
-              catch: (cause) =>
-                new UnavailableError({ message: `Unable to prepare confined file operations: ${cause}` }),
-            })
+            const launch = () =>
+              Effect.gen(function* () {
+                const current = yield* effectivePolicy()
+                return yield* Effect.tryPromise({
+                  try: async () => {
+                    await fs.access(backend.executable, fs.constants.X_OK)
+                    return backend.fileLaunch(
+                      current,
+                      await fs.realpath(process.execPath),
+                      SandboxFileWorker.configured(current),
+                    )
+                  },
+                  catch: (cause) =>
+                    new UnavailableError({ message: `Unable to prepare confined file operations: ${cause}` }),
+                })
+              })
             return SandboxFiles.make({ process: subprocess, launch, directory: location.directory, cwd: scratch })
           }),
           prepare: Effect.fn("Sandbox.prepare")(function* (invocation: ShellCreateBefore, escalated: boolean) {

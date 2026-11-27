@@ -403,6 +403,16 @@ async function mounts(policy: SandboxPolicy.Policy, executable: string) {
       }
     }
   }
+  if (!policy.fullDiskRead) {
+    for (const alias of policy.referenceAliases ?? []) {
+      if (effective.get(alias.target) !== "read") continue
+      // A real mount already supplies any alias under it. Recreate only
+      // aliases in the synthetic root, without granting access to host parents.
+      if (entries.some((item) => SandboxHostPolicy.contains(item.path, alias.path))) continue
+      if (["/dev", "/proc"].some((root) => SandboxHostPolicy.contains(root, alias.path))) continue
+      args.push("--symlink", alias.target, alias.path)
+    }
+  }
   for (const target of reopenedMasks) args.push("--remount-ro", target)
   args.push("--dev", "/dev", ...procMount)
   if (!policy.fullDiskRead) args.push("--remount-ro", "/")

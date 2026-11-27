@@ -18,7 +18,7 @@ export interface Interface extends EnvironmentFiles.Files {
 /** Agent-only file binding. The launch is already confined; failure never falls back to host I/O. */
 export function make(options: {
   readonly process: Pick<AppProcess.Interface, "run">
-  readonly launch: SandboxPolicy.Launch
+  readonly launch: SandboxPolicy.Launch | (() => Effect.Effect<SandboxPolicy.Launch, unknown>)
   readonly directory: string
   readonly cwd: string
 }): Interface {
@@ -34,11 +34,17 @@ export function make(options: {
           path: request.path,
           cause: new Error("File helper request exceeds its collection limit"),
         })
+      const launch =
+        typeof options.launch === "function"
+          ? yield* options
+              .launch()
+              .pipe(Effect.mapError((cause) => new EnvironmentFiles.Failed({ path: request.path, cause })))
+          : options.launch
       const result = yield* options.process
         .run(
-          ChildProcess.make(options.launch.command, options.launch.args, {
+          ChildProcess.make(launch.command, launch.args, {
             cwd: options.cwd,
-            env: options.launch.env,
+            env: launch.env,
             extendEnv: false,
             detached: process.platform !== "win32",
             forceKillAfter: "1 second",

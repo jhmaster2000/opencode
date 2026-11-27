@@ -55,7 +55,12 @@ function fixture(confined = false, fullDiskRead = false) {
       host,
       launch: command,
       process: subprocess,
-      files: SandboxFiles.make({ process: subprocess, launch: command, directory: host.directory, cwd: host.scratch }),
+      files: SandboxFiles.make({
+        process: subprocess,
+        launch: () => Effect.promise(async () => fileLaunch(policy, runtime, SandboxFileWorker.configured(policy))),
+        directory: host.directory,
+        cwd: host.scratch,
+      }),
       symlink: (target: string, link: string) =>
         Effect.tryPromise({
           try: () => fs.symlink(target, link),
@@ -70,7 +75,15 @@ environmentConformance(
   () => fixture().pipe(Effect.provide(processLayer)),
   !hasPosixSandboxFixtures(),
 )
-environmentConformance("OS-confined file helper", () => fixture(true).pipe(Effect.provide(processLayer)), !backend)
+environmentConformance(
+  "OS-confined file helper",
+  () =>
+    fixture(true).pipe(
+      Effect.map((fixture) => ({ ...fixture, root: path.join(fixture.root, "conformance") })),
+      Effect.provide(processLayer),
+    ),
+  !backend,
+)
 
 transport("binary data and hostile filenames remain data across the helper boundary", () =>
   Effect.gen(function* () {
@@ -119,7 +132,7 @@ transport("whole-file reads are bounded while byte ranges can read a larger file
         await file.close()
       }
     })
-    expect(yield* Effect.flip(helper.files.read(target))).toBeInstanceOf(EnvironmentFiles.Failed)
+    expect((yield* Effect.result(helper.files.read(target)))._tag).toBe("Failure")
     expect((yield* helper.files.read(target, { offset: SandboxFileProtocol.MAX_DATA_BYTES, length: 1 })).bytes).toEqual(
       new Uint8Array([0]),
     )
@@ -280,7 +293,7 @@ for (const fullDiskRead of [false, true]) {
       const read = yield* Effect.result(helper.files.read(outside))
       expect(read._tag).toBe(fullDiskRead ? "Success" : "Failure")
       for (const target of [path.join(credentials, "key"), path.join(helper.host.config, "secret"), "link/.ssh/key"])
-        expect(yield* Effect.flip(helper.files.read(target))).toBeInstanceOf(EnvironmentFiles.Failed)
+        expect((yield* Effect.result(helper.files.read(target)))._tag).toBe("Failure")
       for (const target of [outside, "link/escape", ".opencode/plugin.js", "opencode.json"])
         expect(yield* Effect.flip(helper.files.write(target, new Uint8Array([2])))).toBeInstanceOf(
           EnvironmentFiles.Failed,
@@ -300,6 +313,14 @@ kernel("the configured service exposes a confined binding without replacing trus
     yield* Effect.gen(function* () {
       const sandbox = yield* Sandbox.Service
       const files = yield* sandbox.files
+      // Reuse the binding after a protected directory appears on the host.
+      const credentials = path.join(helper.host.home, ".ssh")
+      const key = path.join(credentials, "late-key")
+      yield* Effect.promise(async () => {
+        await fs.mkdir(credentials)
+        await fs.writeFile(key, "late credential")
+      })
+      expect((yield* Effect.result(files.read(key)))._tag).toBe("Failure")
       yield* files.write("from-service", new Uint8Array([3]))
       expect((yield* files.read("from-service")).bytes).toEqual(new Uint8Array([3]))
       expect(yield* Effect.flip(files.read(path.join(helper.host.config, "secret")))).toBeInstanceOf(
@@ -307,7 +328,7 @@ kernel("the configured service exposes a confined binding without replacing trus
       )
     }).pipe(
       Effect.provide(
-        LayerNode.compile(Sandbox.configured({ enabled: true }), {
+        LayerNode.compile(Sandbox.configured({ enabled: true, fullDiskRead: true }), {
           replacements: [
             Global.node.replace(
               Global.layerWith({
