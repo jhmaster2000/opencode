@@ -11,26 +11,22 @@ import { AbsolutePath } from "../src/schema"
 import { Project } from "../src/project"
 import { ChildProcess } from "effect/process"
 import { Sandbox } from "../src/sandbox"
-import { MacSandbox } from "../src/sandbox/macos"
+import { SandboxBackend } from "../src/sandbox/backend"
+import { SandboxHostPolicy } from "../src/sandbox/host-policy"
 import { SandboxFiles } from "../src/sandbox/files"
 import { SandboxFileProtocol } from "../src/sandbox/file-protocol"
 import { SandboxFileWorker } from "../src/sandbox/file-worker"
 import { tmpdirScoped } from "./fixture/tmpdir"
 import { environmentConformance } from "./lib/environment-conformance"
 import { it, testEffect } from "./lib/effect"
+import { nativeSandbox, hasPosixSandboxFixtures } from "./fixture/sandbox-host"
 
 const processLayer = LayerNode.compile(AppProcess.node)
 const live = testEffect(processLayer)
 // This fixture exercises macOS bootstrap flags, /dev/null, and POSIX filenames/symlinks.
-const transport = process.platform === "win32" ? live.live.skip : live.live
-const macos = process.platform === "darwin" ? live.live : live.live.skip
-const probe =
-  process.platform === "darwin"
-    ? Bun.spawnSync([MacSandbox.executable, "-p", "(version 1)(allow default)", "/usr/bin/true"])
-    : undefined
-const kernel = probe?.exitCode === 0 ? live.live : live.live.skip
-if (probe && probe.exitCode !== 0)
-  console.warn(`Confined file integration tests unavailable: ${probe.stderr.toString().trim()}`)
+const transport = !hasPosixSandboxFixtures() ? live.live.skip : live.live
+const backend = await nativeSandbox()
+const kernel = backend ? live.live : live.live.skip
 
 function fixture(confined = false, fullDiskRead = false) {
   return Effect.gen(function* () {
@@ -44,17 +40,15 @@ function fixture(confined = false, fullDiskRead = false) {
       state: path.join(tmp.path, "state"),
     }
     yield* Effect.promise(() => Promise.all(Object.values(host).map((value) => fs.mkdir(value))))
-    const policy = yield* Effect.promise(() => MacSandbox.policy(host, { fullDiskRead }))
-    const launch = MacSandbox.fileLaunch(
-      policy,
-      yield* Effect.promise(() => fs.realpath(process.execPath)),
-      SandboxFileWorker.configured(policy),
+    const active = confined ? backend! : undefined
+    const policy = yield* Effect.promise(() =>
+      active ? active.policy(host, { fullDiskRead }) : SandboxHostPolicy.policy(host, { fullDiskRead }, []),
     )
-    const separator = launch.args.indexOf("--")
-    // Protocol tests use the real worker/bootstrap but intentionally do not claim OS confinement.
-    const command = confined
-      ? launch
-      : { ...launch, command: launch.args[separator + 1], args: launch.args.slice(separator + 2) }
+    const fileLaunch =
+      active?.fileLaunch ??
+      SandboxBackend.posixFileLauncher((_policy, command, args, env) => ({ command, args, env }), "/usr/bin:/bin")
+    const runtime = yield* Effect.promise(() => fs.realpath(process.execPath))
+    const command = yield* Effect.promise(async () => fileLaunch(policy, runtime, SandboxFileWorker.configured(policy)))
     const subprocess = yield* AppProcess.Service
     return {
       root: host.directory,
@@ -72,15 +66,11 @@ function fixture(confined = false, fullDiskRead = false) {
 }
 
 environmentConformance(
-  "file helper protocol (without Seatbelt)",
+  "file helper protocol (without OS confinement)",
   () => fixture().pipe(Effect.provide(processLayer)),
-  process.platform === "win32",
+  !hasPosixSandboxFixtures(),
 )
-environmentConformance(
-  "Seatbelt file helper",
-  () => fixture(true).pipe(Effect.provide(processLayer)),
-  probe?.exitCode !== 0,
-)
+environmentConformance("OS-confined file helper", () => fixture(true).pipe(Effect.provide(processLayer)), !backend)
 
 transport("binary data and hostile filenames remain data across the helper boundary", () =>
   Effect.gen(function* () {
@@ -388,7 +378,7 @@ it.live("the service refuses a confined file binding when sandboxing is disabled
   }),
 )
 
-macos("configured search copies only its executable and protects it in the shell policy", () =>
+kernel("configured search copies only its executable and protects it in the shell policy", () =>
   Effect.gen(function* () {
     const helper = yield* fixture()
     const executable = path.join(helper.host.data, "managed-rg")
@@ -398,16 +388,29 @@ macos("configured search copies only its executable and protects it in the shell
       const launch = yield* sandbox.search(executable)
       const again = yield* sandbox.search(executable)
       expect(again).toEqual(launch)
-      const binary = launch.args[launch.args.indexOf("--") + 1]
-      expect(binary).toContain(`${path.sep}.runtime${path.sep}`)
-      expect(yield* Effect.promise(() => fs.readFile(binary, "utf8"))).toBe("trusted binary bytes")
-      expect(launch.env).toEqual({ PATH: "/usr/bin:/bin", HOME: launch.env.HOME, TMPDIR: launch.env.HOME })
+      const scratch = launch.env.HOME!
+      const runtime = path.join(scratch, ".runtime")
+      const directories = yield* Effect.promise(() => fs.readdir(runtime, { withFileTypes: true }))
+      const staged = directories.filter((entry) => entry.isDirectory())
+      expect(staged).toHaveLength(1)
+      const directory = path.join(runtime, staged[0].name)
+      const binaries = yield* Effect.promise(() => fs.readdir(directory))
+      expect(binaries).toHaveLength(1)
+      expect(yield* Effect.promise(() => fs.readFile(path.join(directory, binaries[0]), "utf8"))).toBe(
+        "trusted binary bytes",
+      )
       const shell = yield* sandbox.prepare(
-        { shell: "/bin/sh", command: "true", env: {}, cwd: helper.root, timeout: 30_000 },
+        {
+          shell: "/bin/sh",
+          command: `if printf blocked > '${directory}/probe'; then exit 1; fi; ! cat '${executable}'`,
+          env: {},
+          cwd: helper.root,
+          timeout: 30_000,
+        },
         false,
       )
-      expect(shell.args.some((arg) => arg.startsWith("-DPROTECTED_") && arg.endsWith(`${path.sep}.runtime`))).toBe(true)
-      expect(launch.args.some((arg) => arg.startsWith("-DREAD_") && arg.endsWith(helper.host.data))).toBe(false)
+      const result = Bun.spawnSync([shell.command, ...shell.args], { cwd: helper.root, env: shell.env })
+      expect(result.exitCode).toBe(0)
     }).pipe(
       Effect.provide(
         LayerNode.compile(Sandbox.configured({ enabled: true }), {

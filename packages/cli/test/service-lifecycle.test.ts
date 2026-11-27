@@ -7,6 +7,7 @@ import os from "node:os"
 import path from "node:path"
 import { OPENCODE_VERSION } from "../src/version"
 import { isolatedEnv } from "./fixture/environment"
+import { nativeSandbox } from "../../core/test/fixture/sandbox-host"
 
 // Real `serve --service` processes driven by the real CLI commands and client. Only behavior that
 // needs real processes lives here; the client's lifecycle decisions are covered by fixture tests in
@@ -15,9 +16,7 @@ import { isolatedEnv } from "./fixture/environment"
 
 const entry = path.join(import.meta.dir, "../src/index.ts")
 const serviceTest = process.platform === "win32" ? test.skip : test
-const sandboxAvailable =
-  process.platform === "darwin" &&
-  Bun.spawnSync(["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true"]).exitCode === 0
+const sandboxAvailable = await nativeSandbox()
 
 test.skipIf(!sandboxAvailable)("service and standalone startup report the active sandbox policy", async () => {
   await using home = await serviceHome()

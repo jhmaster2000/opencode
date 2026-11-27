@@ -9,7 +9,6 @@ import { Reference } from "../src/reference"
 import { InstructionBuiltIns } from "../src/instructions/builtins"
 import { PluginInternal } from "../src/plugin/internal"
 import { Sandbox } from "../src/sandbox"
-import { MacSandbox } from "../src/sandbox/macos"
 import { AbsolutePath } from "../src/schema"
 import { Workspace } from "../src/workspace"
 import { location } from "./fixture/location"
@@ -17,6 +16,7 @@ import { tmpdirScoped } from "./fixture/tmpdir"
 import { it, testEffect } from "./lib/effect"
 import { InternalPluginTestLayer } from "./plugin/fixture"
 import { readInitial } from "./lib/instructions"
+import { nativeSandbox } from "./fixture/sandbox-host"
 
 testEffect(InternalPluginTestLayer).live("the shipped browser plugin is unavailable to sandboxed sessions", () =>
   Effect.gen(function* () {
@@ -34,12 +34,9 @@ testEffect(InternalPluginTestLayer).live("the shipped browser plugin is unavaila
   }),
 )
 
-const probe =
-  process.platform === "darwin"
-    ? Bun.spawnSync([MacSandbox.executable, "-p", "(version 1)(allow default)", "/usr/bin/true"])
-    : undefined
-const macos = probe?.exitCode === 0 ? it.live : it.live.skip
-macos("subagent Location validation pins canonical workspace identity and refuses another execution host", () =>
+const backend = await nativeSandbox()
+const native = backend ? it.live : it.live.skip
+native("subagent Location validation pins canonical workspace identity and refuses another execution host", () =>
   Effect.gen(function* () {
     const tmp = yield* tmpdirScoped("opencode-sandbox-authority-")
     const root = path.join(tmp.path, "workspace")
@@ -94,7 +91,7 @@ macos("subagent Location validation pins canonical workspace identity and refuse
   }),
 )
 
-macos("environment instructions name the writable scratch directory used by sandboxed commands", () =>
+native("environment instructions name the writable scratch directory used by sandboxed commands", () =>
   Effect.gen(function* () {
     const tmp = yield* tmpdirScoped("opencode-sandbox-instructions-")
     const workspace = path.join(tmp.path, "workspace")
@@ -142,7 +139,7 @@ macos("environment instructions name the writable scratch directory used by sand
   }),
 )
 
-macos("reference changes grant read-only shell, file, and search access without exposing host data", () =>
+native("reference changes grant read-only shell, file, and search access without exposing host data", () =>
   Effect.gen(function* () {
     const tmp = yield* tmpdirScoped("opencode-sandbox-references-")
     const workspace = path.join(tmp.path, "workspace")

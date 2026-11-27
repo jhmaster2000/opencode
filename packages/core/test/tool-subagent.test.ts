@@ -37,13 +37,13 @@ import { PluginSupervisor } from "@opencode/core/plugin/supervisor"
 import { Permission } from "@opencode/core/permission"
 import { SubagentTool } from "@opencode/core/tool/plugin/subagent"
 import { Sandbox } from "@opencode/core/sandbox"
-import { MacSandbox } from "@opencode/core/sandbox/macos"
 import { Tool } from "@opencode/core/tool"
 import { tmpdirScoped, tmpdir } from "./fixture/tmpdir"
 import { tempGlobalLayer } from "./fixture/global"
 import { offlineModels } from "./fixture/models"
 import { testEffect } from "./lib/effect"
 import { executeTool, registerToolPlugin, toolIdentity } from "./lib/tool"
+import { nativeSandbox } from "./fixture/sandbox-host"
 
 const childText = "child final response"
 const childModel = Model.Ref.make({ id: Model.ID.make("child"), providerID: Provider.ID.make("test") })
@@ -232,11 +232,8 @@ const withSubagent = (location: Location.Ref) =>
     ).pipe(Effect.provide(locations.get(location)))
   })
 
-const sandboxProbe =
-  process.platform === "darwin"
-    ? Bun.spawnSync([MacSandbox.executable, "-p", "(version 1)(allow default)", "/usr/bin/true"])
-    : undefined
-const sandboxTest = sandboxProbe?.exitCode === 0 ? sandboxIt.live : sandboxIt.live.skip
+const backend = await nativeSandbox()
+const sandboxTest = backend ? sandboxIt.live : sandboxIt.live.skip
 
 describe("SubagentTool", () => {
   sandboxTest("subagents inherit sandbox policy and cannot resume a child in a different Location", () =>

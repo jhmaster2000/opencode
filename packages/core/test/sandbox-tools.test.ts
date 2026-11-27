@@ -27,7 +27,8 @@ import { which } from "../src/util/which"
 import { Sandbox } from "../src/sandbox"
 import { SandboxFiles } from "../src/sandbox/files"
 import { SandboxFileWorker } from "../src/sandbox/file-worker"
-import { MacSandbox } from "../src/sandbox/macos"
+import { SandboxBackend } from "../src/sandbox/backend"
+import { SandboxHostPolicy } from "../src/sandbox/host-policy"
 import { AbsolutePath } from "../src/schema"
 import { Session } from "../src/session"
 import { SessionInstructions } from "../src/session/instructions"
@@ -46,6 +47,7 @@ import { it } from "./lib/effect"
 import { withEnv } from "./fixture/env"
 import { permissionLayer } from "./lib/permission"
 import { executeTool, registerToolPlugin, toolIdentity } from "./lib/tool"
+import { nativeSandbox, hasPosixSandboxFixtures } from "./fixture/sandbox-host"
 
 const toolsNode = makeLocationNode({
   name: "test/sandbox-file-tools",
@@ -79,12 +81,9 @@ const toolsNode = makeLocationNode({
   ],
 })
 
-const probe =
-  process.platform === "darwin"
-    ? Bun.spawnSync([MacSandbox.executable, "-p", "(version 1)(allow default)", "/usr/bin/true"])
-    : undefined
-const kernel = probe?.exitCode === 0 ? it.live : it.live.skip
-const transport = process.platform === "win32" ? it.live.skip : it.live
+const backend = await nativeSandbox()
+const kernel = backend ? it.live : it.live.skip
+const transport = !hasPosixSandboxFixtures() ? it.live.skip : it.live
 const sessionID = Session.ID.make("ses_sandbox_file_tools")
 
 function fixture(fullDiskRead = false) {
@@ -96,7 +95,7 @@ function fixture(fullDiskRead = false) {
     const directory = host.workspace
     yield* Effect.promise(() => Promise.all(Object.values(host).map((value) => fs.mkdir(value))))
     const policy = yield* Effect.promise(() =>
-      MacSandbox.policy(
+      SandboxHostPolicy.policy(
         {
           ...host,
           directory,
@@ -107,9 +106,10 @@ function fixture(fullDiskRead = false) {
           state: host.state,
         },
         { fullDiskRead },
+        [],
       ),
     )
-    const systemRipgrep = process.env.OPENCODE_TEST_RIPGREP ?? which(process.platform === "win32" ? "rg.exe" : "rg")
+    const systemRipgrep = process.env.OPENCODE_TEST_RIPGREP ?? which("rg")
     if (!systemRipgrep) return yield* Effect.die("Native-tool integration tests require an installed ripgrep")
     const bin = path.join(host.data, "bin")
     yield* Effect.promise(async () => {
@@ -141,22 +141,19 @@ function fixture(fullDiskRead = false) {
         ),
       ),
     ).pipe(Layer.provide(hostEnvironmentLayer))
-    const unconfined = (launch: Sandbox.Launch) => {
-      const separator = launch.args.indexOf("--")
-      return { ...launch, command: launch.args[separator + 1], args: launch.args.slice(separator + 2) }
-    }
-    // Explicit transport fixture: real embedded worker and real ripgrep, without Seatbelt.
-    // Kernel cases below use the production Sandbox.configured service instead.
+    const fileLaunch = SandboxBackend.posixFileLauncher(
+      (_policy, command, args, env) => ({ command, args, env }),
+      "/usr/bin:/bin",
+    )
+    // The transport fixture uses the real worker and ripgrep without OS confinement.
     const protocol = Layer.effect(
       Sandbox.Service,
       Effect.gen(function* () {
         const subprocess = yield* AppProcess.Service
-        const launch = unconfined(
-          MacSandbox.fileLaunch(
-            policy,
-            yield* Effect.promise(() => fs.realpath(process.execPath)),
-            SandboxFileWorker.configured(policy),
-          ),
+        const launch = fileLaunch(
+          policy,
+          yield* Effect.promise(() => fs.realpath(process.execPath)),
+          SandboxFileWorker.configured(policy),
         )
         const files = SandboxFiles.make({
           process: {
@@ -180,9 +177,7 @@ function fixture(fullDiskRead = false) {
           command: () => Effect.die("Unconfigured formatter must not execute commands"),
           files: Effect.succeed(files),
           search: (command) =>
-            Effect.succeed(
-              unconfined(MacSandbox.launch(policy, command, [], { PATH: process.env.PATH, HOME: host.scratch })),
-            ),
+            Effect.succeed({ command, args: [], env: { PATH: process.env.PATH, HOME: host.scratch } }),
           prepare: () => Effect.die("Shell is not used in file tool tests"),
         })
       }),
@@ -311,7 +306,7 @@ function fixture(fullDiskRead = false) {
 
 for (const [label, test, mode] of [
   ["protocol routing", transport, "protocol"],
-  ["Seatbelt enforcement", kernel, "kernel"],
+  ["native sandbox enforcement", kernel, "kernel"],
 ] as const) {
   test(`${label}: all native tools share the agent file binding`, () =>
     Effect.gen(function* () {
@@ -625,7 +620,7 @@ kernel("formatter discovery uses a readable project ancestor without host file a
       const processes = yield* AppProcess.Service
       for (const grant of [false, true]) {
         const policy = yield* Effect.promise(() =>
-          MacSandbox.policy(
+          backend!.policy(
             {
               directory: nested,
               scratch: f.host.scratch,
@@ -637,10 +632,9 @@ kernel("formatter discovery uses a readable project ancestor without host file a
             { readableRoots: grant ? [f.directory] : [] },
           ),
         )
-        const launch = MacSandbox.fileLaunch(
-          policy,
-          yield* Effect.promise(() => fs.realpath(process.execPath)),
-          SandboxFileWorker.configured(policy),
+        const runtime = yield* Effect.promise(() => fs.realpath(process.execPath))
+        const launch = yield* Effect.promise(async () =>
+          backend!.fileLaunch(policy, runtime, SandboxFileWorker.configured(policy)),
         )
         const files = SandboxFiles.make({ process: processes, launch, directory: nested, cwd: f.host.scratch })
         const discovery = FormatterDiscovery.confined(files, nested, f.directory, f.directory)

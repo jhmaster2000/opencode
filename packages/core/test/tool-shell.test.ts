@@ -41,7 +41,6 @@ import { ShellResult } from "@opencode/core/shell/result"
 import { ID } from "@opencode/schema/shell"
 import { ShellTool } from "@opencode/core/tool/plugin/shell"
 import { Sandbox } from "@opencode/core/sandbox"
-import { MacSandbox } from "@opencode/core/sandbox/macos"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
 import { ToolOutput } from "@opencode/core/tool-output"
 import { Tool } from "@opencode/core/tool"
@@ -57,6 +56,7 @@ import { testEffect } from "./lib/effect"
 import { permissionLayer } from "./lib/permission"
 import { Expected } from "./lib/session-message"
 import { toolIdentity, executeTool, registerToolPlugin, toolDefinitions } from "./lib/tool"
+import { nativeSandbox } from "./fixture/sandbox-host"
 
 const sessionID = Session.ID.make("ses_shell_tool_test")
 const sessionModel = Model.Ref.make({ id: Model.ID.make("test"), providerID: Provider.ID.make("test") })
@@ -242,11 +242,9 @@ const sandboxPermissionIt = testEffect(
     offlineModels,
   ]),
 )
-const seatbelt =
-  process.platform === "darwin" &&
-  Bun.spawnSync([MacSandbox.executable, "-p", "(version 1)(allow default)", "/usr/bin/true"]).exitCode === 0
+const backend = await nativeSandbox()
 
-const kernelApproval = seatbelt ? sandboxPermissionIt.live : sandboxPermissionIt.live.skip
+const kernelApproval = backend ? sandboxPermissionIt.live : sandboxPermissionIt.live.skip
 kernelApproval(
   "session prefix escapes reuse final-hook approvals while default commands remain confined and denies still win",
   () =>
